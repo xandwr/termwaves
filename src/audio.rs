@@ -133,7 +133,7 @@ fn run_capture(
     let core = context.connect_rc(None)?;
 
     // STREAM_CAPTURE_SINK = true connects to a sink's MONITOR instead of a mic.
-    // With no TARGET_OBJECT, it follows the default sink — the active output.
+    // With no TARGET_OBJECT, it follows the default sink: the active output.
     let mut props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Capture",
@@ -201,7 +201,7 @@ fn run_capture(
                 let f = f32::from_le_bytes(bytes[start..end].try_into().unwrap());
                 state.scratch.push(f);
             }
-            // Overrun drops the tail — acceptable for a visualizer.
+            // Overrun drops the tail: acceptable for a visualizer.
             let _ = state.producer.push_slice(&state.scratch);
         })
         .register()?;

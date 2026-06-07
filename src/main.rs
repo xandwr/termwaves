@@ -7,22 +7,19 @@ use std::io::Write;
 use scope::WaveScope;
 use spectrum::Spectrum;
 
-/// Smoke test for the capture + scope layers until the TUI lands.
+/// smoke test for the capture + scope layers until the TUI lands
 ///
-/// Renders channel 0's envelope as a single line of bars at ~60fps. Real
-/// rendering will replace this; the point here is that [`WaveScope`] gives the
-/// TUI everything it needs (readiness, format, per-channel envelopes) without
-/// touching PipeWire.
+/// renders channel 0s envelope as a single line of bars at ~60fps
 fn main() {
     let handle = audio::start();
     let mut wave = WaveScope::new(handle);
 
     eprintln!("termwaves: waiting for audio…");
     let cols = 60usize;
-    // ~0.1s of history across the columns at 48k — tighten/loosen to taste.
+    // ~0.1s of history across the columns at 48k
     let window = 4_800usize;
 
-    // Spectrum is built lazily once the sample rate is known.
+    // spectrum is built lazily once the sample rate is known
     let mut spectrum: Option<Spectrum> = None;
     let n_bands = 24usize;
 

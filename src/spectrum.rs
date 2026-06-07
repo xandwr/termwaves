@@ -3,7 +3,7 @@
 //! [`Spectrum`] pulls a window of recent samples out of a [`WaveScope`] channel,
 //! runs a real FFT over a Hann-windowed copy, and folds the (linearly spaced)
 //! FFT bins into a fixed set of log-spaced frequency bands. The result is a
-//! per-band magnitude in dB — the shape a bar-graph analyzer wants.
+//! per-band magnitude in dB: the shape a bar-graph analyzer wants.
 //!
 //! Two logarithms live here, and they're independent:
 //!   * **frequency (horizontal):** band edges grow geometrically, so each band
@@ -12,14 +12,14 @@
 //!
 //! The FFT itself is always linear (`rate/N` Hz per bin); the log spacing is a
 //! pure display choice applied when bins are folded into bands. At low
-//! frequencies a band may cover less than one bin — see [`Spectrum::compute`].
+//! frequencies a band may cover less than one bin: see [`Spectrum::compute`].
 
 use std::f32::consts::PI;
 
 use crate::scope::WaveScope;
 
 /// FFT size, in samples. Must be a power of two for the radix-2 transform.
-/// 2048 @ 48k gives ~23 Hz bins and ~43 ms of latency — a reasonable balance
+/// 2048 @ 48k gives ~23 Hz bins and ~43 ms of latency: a reasonable balance
 /// between low-end resolution and responsiveness for a visualizer.
 const FFT_SIZE: usize = 2048;
 
@@ -137,14 +137,14 @@ impl Spectrum {
         //
         // Note the asymmetry log spacing forces: a low band like (lo=1, hi=2)
         // averages a single bin, while a high band may average hundreds. That's
-        // inherent — the linear FFT gives the least resolution exactly where the
+        // inherent: the linear FFT gives the least resolution exactly where the
         // log axis wants the most. Raising FFT_SIZE is the only real fix.
         for (band, &(lo, hi)) in self.bands.iter_mut().zip(&self.band_bins) {
             let mut power = 0.0f32;
             for k in lo..hi {
                 // Power = re² + im². Magnitude normalized so a full-scale tone
                 // bin reads ~1.0 before windowing loss (the window costs ~6 dB,
-                // absorbed into DB_FLOOR's headroom — fine for a visualizer).
+                // absorbed into DB_FLOOR's headroom: fine for a visualizer).
                 let p = self.re[k] * self.re[k] + self.im[k] * self.im[k];
                 power += p;
             }
@@ -185,7 +185,7 @@ fn bit_reversal(n: usize) -> Vec<usize> {
 /// Length must be a power of two and match `rev.len()`.
 ///
 /// Hand-rolled to avoid a dependency. If profiling shows the FFT dominating a
-/// frame, swap this for `rustfft` (plan once, reuse) — the call site only needs
+/// frame, swap this for `rustfft` (plan once, reuse): the call site only needs
 /// `re`/`im` filled, so the rest of `compute` is unaffected.
 fn fft_in_place(re: &mut [f32], im: &mut [f32], rev: &[usize]) {
     let n = re.len();
@@ -237,7 +237,7 @@ mod tests {
     use super::*;
 
     /// A pure sine at a known frequency must light up the band containing it and
-    /// leave distant bands near silence — verifies FFT + bin→band mapping.
+    /// leave distant bands near silence: verifies FFT + bin→band mapping.
     #[test]
     fn pure_tone_lands_in_its_band() {
         let rate = 48_000u32;

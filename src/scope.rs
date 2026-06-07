@@ -2,12 +2,12 @@
 //!
 //! [`WaveScope`] owns the consumer side of the capture: each tick it drains the
 //! ring, deinterleaves into per-channel rolling histories, and can summarize any
-//! channel as a column-sized min/max envelope — the shape a terminal waveform
+//! channel as a column-sized min/max envelope: the shape a terminal waveform
 //! wants.
 
 use crate::audio::CaptureHandle;
 
-/// Samples of history kept per channel. ~0.5s @ 48k — enough to fill a wide
+/// Samples of history kept per channel. ~0.5s @ 48k: enough to fill a wide
 /// terminal at typical zoom while staying cheap to scan each frame.
 const HISTORY_PER_CHANNEL: usize = 24_000;
 
@@ -30,7 +30,7 @@ impl Envelope {
 /// Per-channel circular sample history fed from the capture ring.
 struct ChannelHistory {
     buf: Vec<f32>,
-    /// Index of the next write — `buf[head]` is the oldest sample.
+    /// Index of the next write: `buf[head]` is the oldest sample.
     head: usize,
     filled: bool,
 }
@@ -164,7 +164,7 @@ impl WaveScope {
     /// before any audio has arrived.
     ///
     /// `window` is how many of the most recent samples to span across the
-    /// columns — larger means more history per screen (zoomed out).
+    /// columns: larger means more history per screen (zoomed out).
     pub fn envelope(&self, channel: usize, cols: usize, window: usize) -> Vec<Envelope> {
         let Some(hist) = self.channels.get(channel) else {
             return Vec::new();
