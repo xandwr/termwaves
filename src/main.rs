@@ -40,13 +40,13 @@ const WINDOW_DEFAULT: usize = 4_800; // ~0.1s @ 48k
 const FRAME: Duration = Duration::from_millis(16);
 
 /// The active top-level view, selected via the function keys F1–F8. F1 is the
-/// default combined waveform+spectrum view; F2 is the 3D spectral terrain; F3–F8
+/// default 3D spectral terrain; F2 is the combined waveform+spectrum view; F3–F8
 /// are stubbed placeholders to be filled in later.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
-    /// F1: the original combined waveform + spectrum view.
+    /// F2: the original combined waveform + spectrum view.
     Combined,
-    /// F2: 3D spectral terrain flown forward through time.
+    /// F1: 3D spectral terrain flown forward through time.
     Terrain,
     /// F3–F8: not yet implemented; render a placeholder.
     Stub(u8),
@@ -56,8 +56,8 @@ impl View {
     /// Map a function-key index (1..=8) to its view, if any.
     fn from_fkey(n: u8) -> Option<View> {
         match n {
-            1 => Some(View::Combined),
-            2 => Some(View::Terrain),
+            1 => Some(View::Terrain),
+            2 => Some(View::Combined),
             3..=8 => Some(View::Stub(n)),
             _ => None,
         }
@@ -84,7 +84,7 @@ struct App {
     channel: usize,
     /// Active top-level view, switched with F1–F8.
     view: View,
-    /// Rolling 3D spectral terrain (F2). Built lazily alongside the spectrum.
+    /// Rolling 3D spectral terrain (F1). Built lazily alongside the spectrum.
     terrain: Option<Terrain>,
 }
 
@@ -95,7 +95,7 @@ impl App {
             spectrum: None,
             window: WINDOW_DEFAULT,
             channel: 0,
-            view: View::Combined,
+            view: View::Terrain,
             terrain: None,
         }
     }
@@ -117,7 +117,7 @@ impl App {
 
         // Advance the terrain's time axis with a fresh spectrum row. Computed
         // here (not at render time) so the landscape keeps scrolling even while
-        // another view is displayed, and is ready the moment you switch to F2.
+        // another view is displayed, and is ready the moment you switch to F1.
         if let (Some(spectrum), Some(terrain)) = (self.spectrum.as_mut(), self.terrain.as_mut()) {
             let bands = spectrum.compute(&self.wave, self.channel);
             let row: Vec<f32> = bands.iter().map(|b| b.magnitude).collect();
@@ -197,7 +197,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// F2: the 3D spectral terrain.
+/// F1: the 3D spectral terrain.
 fn render_terrain(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default().borders(Borders::ALL).title("3D terrain");
     let inner = block.inner(area);
@@ -214,7 +214,7 @@ fn render_terrain(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// F1: the combined waveform + spectrum view.
+/// F2: the combined waveform + spectrum view.
 fn render_combined(f: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Min(6), // waveform

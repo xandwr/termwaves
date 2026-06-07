@@ -1,4 +1,4 @@
-//! 3D spectral terrain: the F2 view.
+//! 3D spectral terrain: the F1 view.
 //!
 //! Each audio frame contributes one row of band magnitudes (the same log-spaced
 //! spectrum the F1 bar graph draws). We keep a ring of the most recent rows and
