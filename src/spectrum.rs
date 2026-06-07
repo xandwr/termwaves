@@ -54,6 +54,10 @@ pub struct Spectrum {
     rev: Vec<usize>,
     /// Inclusive FFT-bin range `[lo, hi]` feeding each output band.
     band_bins: Vec<(usize, usize)>,
+    /// Per-band perceptual gain in dB (A-weighting), added to each band's level
+    /// so the display roughly tracks perceived rather than physical loudness.
+    /// Precomputed from band center frequencies; see [`a_weight_db`].
+    weight_db: Vec<f32>,
     /// Output bands, reused across frames.
     bands: Vec<Band>,
 }
@@ -86,6 +90,7 @@ impl Spectrum {
         let hi_hz = max_hz.min(nyquist_bin as f32 * bin_hz).max(lo_hz);
 
         let mut band_bins = Vec::with_capacity(n_bands);
+        let mut weight_db = Vec::with_capacity(n_bands);
         let mut bands = Vec::with_capacity(n_bands);
         let ratio = (hi_hz / lo_hz).powf(1.0 / n_bands as f32);
         for b in 0..n_bands {
@@ -100,6 +105,7 @@ impl Spectrum {
             lo = lo.clamp(1, nyquist_bin); // skip DC (bin 0)
             hi = hi.clamp(lo, nyquist_bin);
             band_bins.push((lo, hi));
+            weight_db.push(a_weight_db(center_hz));
             bands.push(Band {
                 center_hz,
                 magnitude: 0.0,
@@ -113,6 +119,7 @@ impl Spectrum {
             im: vec![0.0; n],
             rev,
             band_bins,
+            weight_db,
             bands,
         }
     }
@@ -140,7 +147,12 @@ impl Spectrum {
         // averages a single bin, while a high band may average hundreds. That's
         // inherent: the linear FFT gives the least resolution exactly where the
         // log axis wants the most. Raising FFT_SIZE is the only real fix.
-        for (band, &(lo, hi)) in self.bands.iter_mut().zip(&self.band_bins) {
+        for ((band, &(lo, hi)), &w_db) in self
+            .bands
+            .iter_mut()
+            .zip(&self.band_bins)
+            .zip(&self.weight_db)
+        {
             let mut power = 0.0f32;
             for k in lo..hi {
                 // Power = re² + im². Magnitude normalized so a full-scale tone
@@ -151,27 +163,47 @@ impl Spectrum {
             }
             let count = (hi - lo).max(1) as f32;
             let mag = (power / count).sqrt() / (n as f32 / 2.0);
-            band.magnitude = to_db_normalized(mag);
+            // Apply the band's A-weighting in the dB domain (where it's defined)
+            // so highs are lifted and lows attenuated toward perceived loudness.
+            band.magnitude = to_db_normalized(mag, w_db);
         }
 
         &self.bands
     }
 
     /// The most recently computed bands (low frequency first).
-    #[allow(dead_code)]
     pub fn bands(&self) -> &[Band] {
         &self.bands
     }
 }
 
 /// Convert a linear magnitude (`0.0..`) to `0.0..=1.0`, where 1.0 is 0 dBFS and
-/// 0.0 is [`DB_FLOOR`] or quieter.
-fn to_db_normalized(mag: f32) -> f32 {
+/// 0.0 is [`DB_FLOOR`] or quieter. `gain_db` is added to the level before
+/// normalizing — used to fold in the per-band A-weighting.
+fn to_db_normalized(mag: f32, gain_db: f32) -> f32 {
     if mag <= 0.0 {
         return 0.0;
     }
-    let db = 20.0 * mag.log10();
+    let db = 20.0 * mag.log10() + gain_db;
     ((db - DB_FLOOR) / -DB_FLOOR).clamp(0.0, 1.0)
+}
+
+/// A-weighting gain in dB at frequency `f` (Hz), the IEC 61672 curve that models
+/// the ear's frequency response: a steep low-frequency roll-off, a gentle
+/// presence boost peaking near 2.5 kHz, and a high-frequency roll-off. Returns 0
+/// dB at the 1 kHz reference. Adding this to each band's level reshapes a
+/// physical spectrum toward a perceived-loudness one, lifting highs relative to
+/// the bass that otherwise dominates.
+fn a_weight_db(f: f32) -> f32 {
+    let f2 = f * f;
+    // Standard A-weighting transfer function R_A(f), a ratio of pole terms.
+    let num = 12194.0f32.powi(2) * f2 * f2;
+    let den = (f2 + 20.6f32.powi(2))
+        * ((f2 + 107.7f32.powi(2)) * (f2 + 737.9f32.powi(2))).sqrt()
+        * (f2 + 12194.0f32.powi(2));
+    let ra = num / den;
+    // +2.00 dB normalizes R_A to 0 dB at 1 kHz (the conventional offset).
+    20.0 * ra.log10() + 2.0
 }
 
 /// Precompute the bit-reversal permutation for a length-`n` (power-of-two) FFT.
@@ -263,7 +295,7 @@ mod tests {
                 power += s.re[k] * s.re[k] + s.im[k] * s.im[k];
             }
             let mag = (power / (hi - lo).max(1) as f32).sqrt() / (n as f32 / 2.0);
-            band.magnitude = to_db_normalized(mag);
+            band.magnitude = to_db_normalized(mag, a_weight_db(band.center_hz));
         }
 
         // Loudest band must contain 1 kHz.

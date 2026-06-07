@@ -1,6 +1,7 @@
 mod audio;
 mod scope;
 mod spectrum;
+mod terrain;
 
 use std::io::{self, Stdout};
 use std::time::Duration;
@@ -20,6 +21,7 @@ use ratatui::{
 
 use scope::WaveScope;
 use spectrum::Spectrum;
+use terrain::Terrain;
 
 /// Frequency range the spectrum spans, in Hz.
 const SPEC_MIN_HZ: f32 = 30.0;
@@ -37,6 +39,40 @@ const WINDOW_DEFAULT: usize = 4_800; // ~0.1s @ 48k
 /// input feels instant while the scope still animates at ~60fps when idle.
 const FRAME: Duration = Duration::from_millis(16);
 
+/// The active top-level view, selected via the function keys F1–F8. F1 is the
+/// default combined waveform+spectrum view; F2 is the 3D spectral terrain; F3–F8
+/// are stubbed placeholders to be filled in later.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum View {
+    /// F1 — the original combined waveform + spectrum view.
+    Combined,
+    /// F2 — 3D spectral terrain flown forward through time.
+    Terrain,
+    /// F3–F8 — not yet implemented; render a placeholder.
+    Stub(u8),
+}
+
+impl View {
+    /// Map a function-key index (1..=8) to its view, if any.
+    fn from_fkey(n: u8) -> Option<View> {
+        match n {
+            1 => Some(View::Combined),
+            2 => Some(View::Terrain),
+            3..=8 => Some(View::Stub(n)),
+            _ => None,
+        }
+    }
+
+    /// Short human-readable name for the status line.
+    fn name(self) -> String {
+        match self {
+            View::Combined => "combined".to_string(),
+            View::Terrain => "3D terrain".to_string(),
+            View::Stub(n) => format!("view F{n}"),
+        }
+    }
+}
+
 /// Owns the render-side state the UI draws from each frame.
 struct App {
     wave: WaveScope,
@@ -46,6 +82,10 @@ struct App {
     window: usize,
     /// Channel currently displayed in both panes.
     channel: usize,
+    /// Active top-level view, switched with F1–F8.
+    view: View,
+    /// Rolling 3D spectral terrain (F2). Built lazily alongside the spectrum.
+    terrain: Option<Terrain>,
 }
 
 impl App {
@@ -55,10 +95,14 @@ impl App {
             spectrum: None,
             window: WINDOW_DEFAULT,
             channel: 0,
+            view: View::Combined,
+            terrain: None,
         }
     }
 
-    /// Pull fresh audio and (re)build the spectrum once the rate is known.
+    /// Pull fresh audio, (re)build the spectrum once the rate is known, and feed
+    /// the latest spectrum row into the terrain so its history scrolls forward
+    /// every frame regardless of which view is on screen.
     fn tick(&mut self) {
         self.wave.tick();
         if self.spectrum.is_none() && self.wave.is_ready() {
@@ -68,6 +112,16 @@ impl App {
                 SPEC_MIN_HZ,
                 SPEC_MAX_HZ,
             ));
+            self.terrain = Some(Terrain::new(N_BANDS));
+        }
+
+        // Advance the terrain's time axis with a fresh spectrum row. Computed
+        // here (not at render time) so the landscape keeps scrolling even while
+        // another view is displayed, and is ready the moment you switch to F2.
+        if let (Some(spectrum), Some(terrain)) = (self.spectrum.as_mut(), self.terrain.as_mut()) {
+            let bands = spectrum.compute(&self.wave, self.channel);
+            let row: Vec<f32> = bands.iter().map(|b| b.magnitude).collect();
+            terrain.push(&row);
         }
     }
 
@@ -113,6 +167,11 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
                         KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_in(),
                         KeyCode::Char('-') | KeyCode::Char('_') => app.zoom_out(),
                         KeyCode::Tab | KeyCode::Char('c') => app.next_channel(),
+                        KeyCode::F(n) => {
+                            if let Some(view) = View::from_fkey(n) {
+                                app.view = view;
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -121,24 +180,72 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
     }
 }
 
-/// Draw the full frame: a title/help row, the waveform pane, the spectrum pane.
+/// Draw the full frame: a status row, then the active view's body below it.
 fn ui(f: &mut Frame, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Length(1), // status line
-        Constraint::Min(6),    // waveform
-        Constraint::Min(6),    // spectrum
+        Constraint::Min(0),    // view body
     ])
     .split(f.area());
 
     render_status(f, chunks[0], app);
-    render_waveform(f, chunks[1], app);
-    render_spectrum(f, chunks[2], app);
+
+    match app.view {
+        View::Combined => render_combined(f, chunks[1], app),
+        View::Terrain => render_terrain(f, chunks[1], app),
+        View::Stub(n) => render_stub(f, chunks[1], n),
+    }
+}
+
+/// F2 — the 3D spectral terrain.
+fn render_terrain(f: &mut Frame, area: Rect, app: &mut App) {
+    let block = Block::default().borders(Borders::ALL).title("3D terrain");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    match app.terrain.as_ref() {
+        Some(terrain) => terrain.render(f, inner),
+        None => f.render_widget(
+            Line::from("warming up…")
+                .style(Style::default().add_modifier(Modifier::DIM))
+                .centered(),
+            inner,
+        ),
+    }
+}
+
+/// F1 — the combined waveform + spectrum view.
+fn render_combined(f: &mut Frame, area: Rect, app: &mut App) {
+    let chunks = Layout::vertical([
+        Constraint::Min(6), // waveform
+        Constraint::Min(6), // spectrum
+    ])
+    .split(area);
+
+    render_waveform(f, chunks[0], app);
+    render_spectrum(f, chunks[1], app);
+}
+
+/// Placeholder for an unimplemented F3–F8 view.
+fn render_stub(f: &mut Frame, area: Rect, n: u8) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("F{n}"));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(
+        Line::from(format!("view F{n} — not implemented yet"))
+            .style(Style::default().add_modifier(Modifier::DIM))
+            .centered(),
+        inner,
+    );
 }
 
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let status = if app.wave.is_ready() {
         format!(
-            " termwaves — ch {}/{} @ {} Hz · window {} samp   [+/- zoom · Tab channel · q quit]",
+            " termwaves — {} · ch {}/{} @ {} Hz · window {} samp   [F1-F8 view · +/- zoom · Tab channel · q quit]",
+            app.view.name(),
             app.channel,
             app.wave.channel_count(),
             app.wave.sample_rate(),
@@ -190,11 +297,12 @@ fn render_spectrum(f: &mut Frame, area: Rect, app: &mut App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let channel = app.channel;
-    let Some(spectrum) = app.spectrum.as_mut() else {
+    // `tick` already recomputed the spectrum this frame (it feeds the terrain),
+    // so read the cached bands rather than running a second FFT here.
+    let Some(spectrum) = app.spectrum.as_ref() else {
         return;
     };
-    let bands = spectrum.compute(&app.wave, channel);
+    let bands = spectrum.bands();
 
     // Scale normalized 0..=1 magnitudes to the pane height for bar values.
     let height = inner.height.max(1);
@@ -221,7 +329,7 @@ fn render_spectrum(f: &mut Frame, area: Rect, app: &mut App) {
 /// quiet bands, ramping through cyan/green/yellow to red at full scale. The ramp
 /// is piecewise-linear over RGB control points, which reads as a smooth gradient
 /// on a truecolor terminal.
-fn heat_color(t: f32) -> Color {
+pub(crate) fn heat_color(t: f32) -> Color {
     // Control points along the ramp, low intensity first.
     const STOPS: [(u8, u8, u8); 5] = [
         (0, 0, 255),   // blue
