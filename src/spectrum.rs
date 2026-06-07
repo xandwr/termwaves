@@ -19,9 +19,9 @@ use std::f32::consts::PI;
 use crate::scope::WaveScope;
 
 /// FFT size, in samples. Must be a power of two for the radix-2 transform.
-/// 2048 @ 48k gives ~23 Hz bins and ~43 ms of latency: a reasonable balance
-/// between low-end resolution and responsiveness for a visualizer.
-const FFT_SIZE: usize = 2048;
+/// 4096 @ 48k gives ~12 Hz bins and ~85 ms of latency: more low-end resolution
+/// (so denser bands carry real detail) at a modest latency cost for a visualizer.
+const FFT_SIZE: usize = 4096;
 
 /// Floor for dB conversion: magnitudes at or below this map to 0.0 in the
 /// normalized output. -90 dB is below the noise of any real playback path.
@@ -175,7 +175,10 @@ fn to_db_normalized(mag: f32) -> f32 {
 /// Precompute the bit-reversal permutation for a length-`n` (power-of-two) FFT.
 fn bit_reversal(n: usize) -> Vec<usize> {
     let bits = n.trailing_zeros();
-    (0..n).map(|i| (i as u32).reverse_bits() >> (32 - bits)).map(|x| x as usize).collect()
+    (0..n)
+        .map(|i| (i as u32).reverse_bits() >> (32 - bits))
+        .map(|x| x as usize)
+        .collect()
 }
 
 /// In-place iterative radix-2 Cooley–Tukey FFT.
