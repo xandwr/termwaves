@@ -31,6 +31,7 @@ const DB_FLOOR: f32 = -90.0;
 /// current magnitude, normalized to `0.0..=1.0` where 1.0 is full-scale (0 dB).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Band {
+    #[allow(dead_code)]
     pub center_hz: f32,
     /// `0.0..=1.0`, already log-scaled (dB) and normalized against [`DB_FLOOR`].
     pub magnitude: f32,
@@ -157,6 +158,7 @@ impl Spectrum {
     }
 
     /// The most recently computed bands (low frequency first).
+    #[allow(dead_code)]
     pub fn bands(&self) -> &[Band] {
         &self.bands
     }

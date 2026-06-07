@@ -22,6 +22,7 @@ pub struct Envelope {
 
 impl Envelope {
     /// Peak magnitude in this column, in `0.0..=1.0` for in-range audio.
+    #[allow(dead_code)]
     pub fn peak(&self) -> f32 {
         self.min.abs().max(self.max.abs())
     }
