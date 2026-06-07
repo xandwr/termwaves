@@ -27,6 +27,18 @@ const FFT_SIZE: usize = 4096;
 /// normalized output. -90 dB is below the noise of any real playback path.
 const DB_FLOOR: f32 = -90.0;
 
+/// EMA smoothing factor for the rolling loudness baseline, per `compute` call.
+/// At ~60 fps a coefficient of 0.001 gives a time constant of ~1/(0.001·60) ≈
+/// 17 s: long enough to read as "the average of the rest of the song" while
+/// still drifting with major dynamic shifts (a quiet intro into a loud drop).
+const LOUDNESS_EMA_ALPHA: f32 = 0.001;
+
+/// How far, in dB, the adaptive makeup gain is allowed to swing either side of
+/// the baseline. Clamping keeps a silent gap or a sudden transient from
+/// blowing the bars to full-scale or crushing them to nothing; the display
+/// still tracks felt intensity within a sane window.
+const ADAPTIVE_GAIN_CLAMP_DB: f32 = 12.0;
+
 /// One frequency band: its center frequency (for labeling/debug) and its
 /// current magnitude, normalized to `0.0..=1.0` where 1.0 is full-scale (0 dB).
 #[derive(Clone, Copy, Debug, Default)]
@@ -60,6 +72,11 @@ pub struct Spectrum {
     weight_db: Vec<f32>,
     /// Output bands, reused across frames.
     bands: Vec<Band>,
+    /// Rolling baseline of perceived (A-weighted) loudness in dB: an EMA over
+    /// every `compute` call, i.e. "the average loudness of the song so far".
+    /// `None` until the first frame seeds it, so the baseline starts at the
+    /// actual loudness instead of crawling up from silence. See [`Spectrum::compute`].
+    loudness_baseline_db: Option<f32>,
 }
 
 impl Spectrum {
@@ -121,6 +138,7 @@ impl Spectrum {
             band_bins,
             weight_db,
             bands,
+            loudness_baseline_db: None,
         }
     }
 
@@ -147,12 +165,22 @@ impl Spectrum {
         // averages a single bin, while a high band may average hundreds. That's
         // inherent: the linear FFT gives the least resolution exactly where the
         // log axis wants the most. Raising FFT_SIZE is the only real fix.
-        for ((band, &(lo, hi)), &w_db) in self
-            .bands
-            .iter_mut()
-            .zip(&self.band_bins)
-            .zip(&self.weight_db)
-        {
+        //
+        // Two passes: first compute each band's A-weighted linear magnitude and
+        // accumulate the total perceived loudness for this frame; then, with the
+        // rolling baseline updated, convert each band to dB with an adaptive
+        // makeup gain that lifts/drops the whole display by how loud *this* frame
+        // feels relative to the song's running average.
+
+        // Perceived loudness = total A-weighted power across bands. Summing the
+        // weighted *power* (not the per-band dB) integrates across frequency the
+        // way the ear does, so a track whose energy is spread thin still reads as
+        // loud: which is exactly what a single bar can't show.
+        let mut weighted_power = 0.0f32;
+        // Stash each band's pre-gain linear magnitude in `re[0..n_bands]`: the
+        // FFT buffer is dead once folding is done, so we reuse it as scratch and
+        // avoid a per-frame allocation.
+        for (i, (&(lo, hi), &w_db)) in self.band_bins.iter().zip(&self.weight_db).enumerate() {
             let mut power = 0.0f32;
             for k in lo..hi {
                 // Power = re² + im². Magnitude normalized so a full-scale tone
@@ -163,9 +191,47 @@ impl Spectrum {
             }
             let count = (hi - lo).max(1) as f32;
             let mag = (power / count).sqrt() / (n as f32 / 2.0);
-            // Apply the band's A-weighting in the dB domain (where it's defined)
-            // so highs are lifted and lows attenuated toward perceived loudness.
-            band.magnitude = to_db_normalized(mag, w_db);
+            // Convert the A-weight (a dB gain) back to a linear power factor and
+            // accumulate, so quiet bands contribute proportionally to loudness.
+            let w_lin = 10.0f32.powf(w_db / 10.0);
+            weighted_power += mag * mag * w_lin;
+            self.samples[i] = mag; // reuse windowed-input scratch for pre-gain mags
+        }
+
+        // This frame's perceived loudness in dB. The 10·log10 (power, not
+        // amplitude) matches how `weighted_power` was summed.
+        let frame_loudness_db = if weighted_power > 0.0 {
+            10.0 * weighted_power.log10()
+        } else {
+            DB_FLOOR
+        };
+
+        // Update the rolling baseline ("average of the rest of the song"). Seed
+        // it on the first frame so it doesn't have to climb from -inf.
+        let baseline_db = match self.loudness_baseline_db {
+            Some(prev) => {
+                let next = prev + LOUDNESS_EMA_ALPHA * (frame_loudness_db - prev);
+                self.loudness_baseline_db = Some(next);
+                next
+            }
+            None => {
+                self.loudness_baseline_db = Some(frame_loudness_db);
+                frame_loudness_db
+            }
+        };
+
+        // Adaptive makeup gain: how much louder this frame feels than the song's
+        // baseline, clamped so a gap or a transient can't slam the bars to the
+        // rail. A loud passage lifts every bar; a quiet one drops them: overall
+        // height now tracks felt intensity while shape stays absolute.
+        let adaptive_gain_db = (frame_loudness_db - baseline_db)
+            .clamp(-ADAPTIVE_GAIN_CLAMP_DB, ADAPTIVE_GAIN_CLAMP_DB);
+
+        for ((band, &w_db), i) in self.bands.iter_mut().zip(&self.weight_db).zip(0..) {
+            let mag = self.samples[i];
+            // A-weighting (perceptual shape) plus the adaptive gain (perceptual
+            // *level*), both applied in the dB domain.
+            band.magnitude = to_db_normalized(mag, w_db + adaptive_gain_db);
         }
 
         &self.bands
@@ -179,7 +245,7 @@ impl Spectrum {
 
 /// Convert a linear magnitude (`0.0..`) to `0.0..=1.0`, where 1.0 is 0 dBFS and
 /// 0.0 is [`DB_FLOOR`] or quieter. `gain_db` is added to the level before
-/// normalizing — used to fold in the per-band A-weighting.
+/// normalizing: used to fold in the per-band A-weighting.
 fn to_db_normalized(mag: f32, gain_db: f32) -> f32 {
     if mag <= 0.0 {
         return 0.0;

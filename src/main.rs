@@ -44,11 +44,11 @@ const FRAME: Duration = Duration::from_millis(16);
 /// are stubbed placeholders to be filled in later.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
-    /// F1 — the original combined waveform + spectrum view.
+    /// F1: the original combined waveform + spectrum view.
     Combined,
-    /// F2 — 3D spectral terrain flown forward through time.
+    /// F2: 3D spectral terrain flown forward through time.
     Terrain,
-    /// F3–F8 — not yet implemented; render a placeholder.
+    /// F3–F8: not yet implemented; render a placeholder.
     Stub(u8),
 }
 
@@ -197,7 +197,7 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// F2 — the 3D spectral terrain.
+/// F2: the 3D spectral terrain.
 fn render_terrain(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default().borders(Borders::ALL).title("3D terrain");
     let inner = block.inner(area);
@@ -214,7 +214,7 @@ fn render_terrain(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// F1 — the combined waveform + spectrum view.
+/// F1: the combined waveform + spectrum view.
 fn render_combined(f: &mut Frame, area: Rect, app: &mut App) {
     let chunks = Layout::vertical([
         Constraint::Min(6), // waveform
@@ -234,7 +234,7 @@ fn render_stub(f: &mut Frame, area: Rect, n: u8) {
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(
-        Line::from(format!("view F{n} — not implemented yet"))
+        Line::from(format!("view F{n}: not implemented yet"))
             .style(Style::default().add_modifier(Modifier::DIM))
             .centered(),
         inner,
@@ -244,7 +244,7 @@ fn render_stub(f: &mut Frame, area: Rect, n: u8) {
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let status = if app.wave.is_ready() {
         format!(
-            " termwaves — {} · ch {}/{} @ {} Hz · window {} samp   [F1-F8 view · +/- zoom · Tab channel · q quit]",
+            " termwaves: {} · ch {}/{} @ {} Hz · window {} samp   [F1-F8 view · +/- zoom · Tab channel · q quit]",
             app.view.name(),
             app.channel,
             app.wave.channel_count(),
@@ -252,7 +252,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             app.window,
         )
     } else {
-        " termwaves — waiting for audio…   [q quit]".to_string()
+        " termwaves: waiting for audio…   [q quit]".to_string()
     };
     f.render_widget(
         Line::from(status).style(Style::default().add_modifier(Modifier::DIM)),
