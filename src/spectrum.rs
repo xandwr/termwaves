@@ -1,108 +1,47 @@
 //! Log-spaced frequency spectrum, the second view the TUI renders from.
-//!
-//! [`Spectrum`] pulls a window of recent samples out of a [`WaveScope`] channel,
-//! runs a real FFT over a Hann-windowed copy, and folds the (linearly spaced)
-//! FFT bins into a fixed set of log-spaced frequency bands. The result is a
-//! per-band magnitude in dB: the shape a bar-graph analyzer wants.
-//!
-//! Two logarithms live here, and they're independent:
-//!   * **frequency (horizontal):** band edges grow geometrically, so each band
-//!     spans a roughly constant *ratio* of frequency (≈ musical pitch).
-//!   * **amplitude (vertical):** band energy is converted to dB before display.
-//!
-//! The FFT itself is always linear (`rate/N` Hz per bin); the log spacing is a
-//! pure display choice applied when bins are folded into bands. At low
-//! frequencies a band may cover less than one bin: see [`Spectrum::compute`].
 
 use std::f32::consts::PI;
 
 use crate::scope::WaveScope;
 
-/// FFT size, in samples. Must be a power of two for the radix-2 transform.
-/// 4096 @ 48k gives ~12 Hz bins and ~85 ms of latency: more low-end resolution
-/// (so denser bands carry real detail) at a modest latency cost for a visualizer.
 const FFT_SIZE: usize = 4096;
-
-/// Floor for dB conversion: magnitudes at or below this map to 0.0 in the
-/// normalized output. -90 dB is below the noise of any real playback path.
 const DB_FLOOR: f32 = -90.0;
-
-/// EMA smoothing factor for the rolling loudness baseline, per `compute` call.
-/// At ~60 fps a coefficient of 0.001 gives a time constant of ~1/(0.001·60) ≈
-/// 17 s: long enough to read as "the average of the rest of the song" while
-/// still drifting with major dynamic shifts (a quiet intro into a loud drop).
 const LOUDNESS_EMA_ALPHA: f32 = 0.001;
-
-/// How far, in dB, the adaptive makeup gain is allowed to swing either side of
-/// the baseline. Clamping keeps a silent gap or a sudden transient from
-/// blowing the bars to full-scale or crushing them to nothing; the display
-/// still tracks felt intensity within a sane window.
 const ADAPTIVE_GAIN_CLAMP_DB: f32 = 12.0;
 
-/// One frequency band: its center frequency (for labeling/debug) and its
-/// current magnitude, normalized to `0.0..=1.0` where 1.0 is full-scale (0 dB).
+/// One frequency band: center frequency and `0.0..=1.0` normalized magnitude.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Band {
     #[allow(dead_code)]
     pub center_hz: f32,
-    /// `0.0..=1.0`, already log-scaled (dB) and normalized against [`DB_FLOOR`].
     pub magnitude: f32,
 }
 
 /// Computes a log-spaced magnitude spectrum from a [`WaveScope`] channel.
-///
-/// All scratch is owned and reused, so [`Spectrum::compute`] never allocates
-/// after construction. Build once with the desired band count; call `compute`
-/// each frame.
 pub struct Spectrum {
-    /// Hann window coefficients, precomputed for `FFT_SIZE`.
     window: Vec<f32>,
-    /// Windowed real input copied from the scope each frame.
     samples: Vec<f32>,
-    /// FFT working buffers (real / imaginary), length `FFT_SIZE`.
     re: Vec<f32>,
     im: Vec<f32>,
-    /// Bit-reversal permutation indices for `FFT_SIZE` (precomputed).
     rev: Vec<usize>,
-    /// Inclusive FFT-bin range `[lo, hi]` feeding each output band.
     band_bins: Vec<(usize, usize)>,
-    /// Per-band perceptual gain in dB (A-weighting), added to each band's level
-    /// so the display roughly tracks perceived rather than physical loudness.
-    /// Precomputed from band center frequencies; see [`a_weight_db`].
     weight_db: Vec<f32>,
-    /// Output bands, reused across frames.
     bands: Vec<Band>,
-    /// Rolling baseline of perceived (A-weighted) loudness in dB: an EMA over
-    /// every `compute` call, i.e. "the average loudness of the song so far".
-    /// `None` until the first frame seeds it, so the baseline starts at the
-    /// actual loudness instead of crawling up from silence. See [`Spectrum::compute`].
     loudness_baseline_db: Option<f32>,
 }
 
 impl Spectrum {
-    /// Build a spectrum with `n_bands` log-spaced bands spanning roughly
-    /// `min_hz..=max_hz`, given the capture `sample_rate` (Hz).
-    ///
-    /// `sample_rate` only fixes the bin→frequency mapping; pass the scope's
-    /// negotiated rate. `min_hz` is clamped up to the first usable bin and
-    /// `max_hz` down to Nyquist.
+    /// Build a spectrum with `n_bands` log-spaced bands over `min_hz..=max_hz`.
     pub fn new(sample_rate: u32, n_bands: usize, min_hz: f32, max_hz: f32) -> Self {
         let n = FFT_SIZE;
         let window = (0..n)
-            .map(|i| {
-                // Periodic Hann: 0.5 - 0.5*cos(2πi/N). Tapers the window edges to
-                // suppress spectral leakage from the implicit rectangular cut.
-                0.5 - 0.5 * (2.0 * PI * i as f32 / n as f32).cos()
-            })
+            .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / n as f32).cos())
             .collect();
 
         let rev = bit_reversal(n);
 
-        // Map the requested frequency range onto FFT bins, then space the band
-        // *edges* geometrically across that range. Folding linear bins into
-        // these log-spaced edges is where the horizontal log axis comes from.
         let bin_hz = sample_rate as f32 / n as f32;
-        let nyquist_bin = n / 2; // bins 0..=N/2 are the unique (real-input) ones
+        let nyquist_bin = n / 2;
         let lo_hz = min_hz.max(bin_hz).min(max_hz);
         let hi_hz = max_hz.min(nyquist_bin as f32 * bin_hz).max(lo_hz);
 
@@ -111,15 +50,12 @@ impl Spectrum {
         let mut bands = Vec::with_capacity(n_bands);
         let ratio = (hi_hz / lo_hz).powf(1.0 / n_bands as f32);
         for b in 0..n_bands {
-            // Geometric edges: edge(b) = lo * ratio^b. Constant ratio per band.
             let f_lo = lo_hz * ratio.powi(b as i32);
             let f_hi = lo_hz * ratio.powi(b as i32 + 1);
-            let center_hz = (f_lo * f_hi).sqrt(); // geometric mean
-            // Bins covering [f_lo, f_hi). Clamp into the usable range and ensure
-            // each band claims at least one bin so low bands never go empty.
+            let center_hz = (f_lo * f_hi).sqrt();
             let mut lo = (f_lo / bin_hz).floor() as usize;
             let mut hi = (f_hi / bin_hz).ceil() as usize;
-            lo = lo.clamp(1, nyquist_bin); // skip DC (bin 0)
+            lo = lo.clamp(1, nyquist_bin);
             hi = hi.clamp(lo, nyquist_bin);
             band_bins.push((lo, hi));
             weight_db.push(a_weight_db(center_hz));
@@ -143,12 +79,9 @@ impl Spectrum {
     }
 
     /// Recompute the spectrum from the most recent audio on `channel`.
-    /// Returns the band slice (also accessible via [`Spectrum::bands`]).
     pub fn compute(&mut self, scope: &WaveScope, channel: usize) -> &[Band] {
         let n = self.samples.len();
 
-        // Pull the freshest FFT_SIZE samples (zero-padded if not yet filled),
-        // applying the Hann window as we copy.
         scope.samples_into(channel, &mut self.samples);
         for i in 0..n {
             self.re[i] = self.samples[i] * self.window[i];
@@ -157,57 +90,26 @@ impl Spectrum {
 
         fft_in_place(&mut self.re, &mut self.im, &self.rev);
 
-        // Fold linear bins into log bands. Each band takes the *mean* power of
-        // its bins (mean, not sum, so wide high bands aren't unfairly louder
-        // than narrow low ones), then converts to dB.
-        //
-        // Note the asymmetry log spacing forces: a low band like (lo=1, hi=2)
-        // averages a single bin, while a high band may average hundreds. That's
-        // inherent: the linear FFT gives the least resolution exactly where the
-        // log axis wants the most. Raising FFT_SIZE is the only real fix.
-        //
-        // Two passes: first compute each band's A-weighted linear magnitude and
-        // accumulate the total perceived loudness for this frame; then, with the
-        // rolling baseline updated, convert each band to dB with an adaptive
-        // makeup gain that lifts/drops the whole display by how loud *this* frame
-        // feels relative to the song's running average.
-
-        // Perceived loudness = total A-weighted power across bands. Summing the
-        // weighted *power* (not the per-band dB) integrates across frequency the
-        // way the ear does, so a track whose energy is spread thin still reads as
-        // loud: which is exactly what a single bar can't show.
         let mut weighted_power = 0.0f32;
-        // Stash each band's pre-gain linear magnitude in `re[0..n_bands]`: the
-        // FFT buffer is dead once folding is done, so we reuse it as scratch and
-        // avoid a per-frame allocation.
         for (i, (&(lo, hi), &w_db)) in self.band_bins.iter().zip(&self.weight_db).enumerate() {
             let mut power = 0.0f32;
             for k in lo..hi {
-                // Power = re² + im². Magnitude normalized so a full-scale tone
-                // bin reads ~1.0 before windowing loss (the window costs ~6 dB,
-                // absorbed into DB_FLOOR's headroom: fine for a visualizer).
                 let p = self.re[k] * self.re[k] + self.im[k] * self.im[k];
                 power += p;
             }
             let count = (hi - lo).max(1) as f32;
             let mag = (power / count).sqrt() / (n as f32 / 2.0);
-            // Convert the A-weight (a dB gain) back to a linear power factor and
-            // accumulate, so quiet bands contribute proportionally to loudness.
             let w_lin = 10.0f32.powf(w_db / 10.0);
             weighted_power += mag * mag * w_lin;
-            self.samples[i] = mag; // reuse windowed-input scratch for pre-gain mags
+            self.samples[i] = mag;
         }
 
-        // This frame's perceived loudness in dB. The 10·log10 (power, not
-        // amplitude) matches how `weighted_power` was summed.
         let frame_loudness_db = if weighted_power > 0.0 {
             10.0 * weighted_power.log10()
         } else {
             DB_FLOOR
         };
 
-        // Update the rolling baseline ("average of the rest of the song"). Seed
-        // it on the first frame so it doesn't have to climb from -inf.
         let baseline_db = match self.loudness_baseline_db {
             Some(prev) => {
                 let next = prev + LOUDNESS_EMA_ALPHA * (frame_loudness_db - prev);
@@ -220,17 +122,11 @@ impl Spectrum {
             }
         };
 
-        // Adaptive makeup gain: how much louder this frame feels than the song's
-        // baseline, clamped so a gap or a transient can't slam the bars to the
-        // rail. A loud passage lifts every bar; a quiet one drops them: overall
-        // height now tracks felt intensity while shape stays absolute.
         let adaptive_gain_db = (frame_loudness_db - baseline_db)
             .clamp(-ADAPTIVE_GAIN_CLAMP_DB, ADAPTIVE_GAIN_CLAMP_DB);
 
         for ((band, &w_db), i) in self.bands.iter_mut().zip(&self.weight_db).zip(0..) {
             let mag = self.samples[i];
-            // A-weighting (perceptual shape) plus the adaptive gain (perceptual
-            // *level*), both applied in the dB domain.
             band.magnitude = to_db_normalized(mag, w_db + adaptive_gain_db);
         }
 
@@ -243,9 +139,7 @@ impl Spectrum {
     }
 }
 
-/// Convert a linear magnitude (`0.0..`) to `0.0..=1.0`, where 1.0 is 0 dBFS and
-/// 0.0 is [`DB_FLOOR`] or quieter. `gain_db` is added to the level before
-/// normalizing: used to fold in the per-band A-weighting.
+/// Convert a linear magnitude to `0.0..=1.0`, applying `gain_db` before normalizing.
 fn to_db_normalized(mag: f32, gain_db: f32) -> f32 {
     if mag <= 0.0 {
         return 0.0;
@@ -254,21 +148,14 @@ fn to_db_normalized(mag: f32, gain_db: f32) -> f32 {
     ((db - DB_FLOOR) / -DB_FLOOR).clamp(0.0, 1.0)
 }
 
-/// A-weighting gain in dB at frequency `f` (Hz), the IEC 61672 curve that models
-/// the ear's frequency response: a steep low-frequency roll-off, a gentle
-/// presence boost peaking near 2.5 kHz, and a high-frequency roll-off. Returns 0
-/// dB at the 1 kHz reference. Adding this to each band's level reshapes a
-/// physical spectrum toward a perceived-loudness one, lifting highs relative to
-/// the bass that otherwise dominates.
+/// A-weighting gain in dB at frequency `f` (Hz), the IEC 61672 curve.
 fn a_weight_db(f: f32) -> f32 {
     let f2 = f * f;
-    // Standard A-weighting transfer function R_A(f), a ratio of pole terms.
     let num = 12194.0f32.powi(2) * f2 * f2;
     let den = (f2 + 20.6f32.powi(2))
         * ((f2 + 107.7f32.powi(2)) * (f2 + 737.9f32.powi(2))).sqrt()
         * (f2 + 12194.0f32.powi(2));
     let ra = num / den;
-    // +2.00 dB normalizes R_A to 0 dB at 1 kHz (the conventional offset).
     20.0 * ra.log10() + 2.0
 }
 
@@ -282,18 +169,9 @@ fn bit_reversal(n: usize) -> Vec<usize> {
 }
 
 /// In-place iterative radix-2 Cooley–Tukey FFT.
-///
-/// `re`/`im` hold the complex input and are overwritten with the transform;
-/// `rev` is the precomputed bit-reversal permutation (see [`bit_reversal`]).
-/// Length must be a power of two and match `rev.len()`.
-///
-/// Hand-rolled to avoid a dependency. If profiling shows the FFT dominating a
-/// frame, swap this for `rustfft` (plan once, reuse): the call site only needs
-/// `re`/`im` filled, so the rest of `compute` is unaffected.
 fn fft_in_place(re: &mut [f32], im: &mut [f32], rev: &[usize]) {
     let n = re.len();
 
-    // Reorder into bit-reversed index order (decimation in time).
     for i in 0..n {
         let j = rev[i];
         if j > i {
@@ -302,17 +180,13 @@ fn fft_in_place(re: &mut [f32], im: &mut [f32], rev: &[usize]) {
         }
     }
 
-    // Butterflies over successively doubling sub-transform lengths.
     let mut len = 2;
     while len <= n {
         let half = len / 2;
-        // Principal twiddle for this stage: e^{-2πi/len}.
         let ang = -2.0 * PI / len as f32;
         let (wstep_re, wstep_im) = (ang.cos(), ang.sin());
         let mut start = 0;
         while start < n {
-            // Walk the twiddle around the unit circle by complex multiply,
-            // rather than calling sin/cos per butterfly.
             let (mut w_re, mut w_im) = (1.0f32, 0.0f32);
             for k in 0..half {
                 let a = start + k;
@@ -323,7 +197,6 @@ fn fft_in_place(re: &mut [f32], im: &mut [f32], rev: &[usize]) {
                 im[b] = im[a] - t_im;
                 re[a] += t_re;
                 im[a] += t_im;
-                // w *= wstep
                 let nw_re = w_re * wstep_re - w_im * wstep_im;
                 let nw_im = w_re * wstep_im + w_im * wstep_re;
                 w_re = nw_re;
@@ -339,14 +212,10 @@ fn fft_in_place(re: &mut [f32], im: &mut [f32], rev: &[usize]) {
 mod tests {
     use super::*;
 
-    /// A pure sine at a known frequency must light up the band containing it and
-    /// leave distant bands near silence: verifies FFT + bin→band mapping.
     #[test]
     fn pure_tone_lands_in_its_band() {
         let rate = 48_000u32;
         let mut s = Spectrum::new(rate, 24, 30.0, 16_000.0);
-        // Synthesize a 1 kHz sine directly into the FFT buffers, bypassing the
-        // scope (we only exercise the transform + folding here).
         let freq = 1000.0f32;
         let n = s.samples.len();
         for i in 0..n {
@@ -364,7 +233,6 @@ mod tests {
             band.magnitude = to_db_normalized(mag, a_weight_db(band.center_hz));
         }
 
-        // Loudest band must contain 1 kHz.
         let loudest = s
             .bands
             .iter()

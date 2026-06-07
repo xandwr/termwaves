@@ -1,9 +1,4 @@
 //! PipeWire system-output capture.
-//!
-//! Connects a capture stream to the default sink's MONITOR (via
-//! `STREAM_CAPTURE_SINK`), decodes interleaved F32LE frames, and pushes them
-//! into a lock-free ring buffer. The TUI side drains that ring through
-//! [`CaptureHandle`] without ever touching PipeWire.
 
 use std::convert::TryInto;
 use std::mem;
@@ -19,19 +14,12 @@ use spa::pod::Pod;
 use ringbuf::HeapRb;
 use ringbuf::traits::{Consumer, Producer as _, Split};
 
-/// Ring capacity in samples (interleaved across channels). ~1s of stereo @ 48k.
-/// The renderer is expected to drain faster than this fills; on overrun we drop
-/// the newest samples, which only ever costs a visual frame.
 const RING_CAPACITY: usize = 96_000;
 
 type RingProducer = ringbuf::wrap::caching::Caching<Arc<HeapRb<f32>>, true, false>;
 type RingConsumer = ringbuf::wrap::caching::Caching<Arc<HeapRb<f32>>, false, true>;
 
 /// Negotiated stream format, shared from the capture thread to the consumer.
-///
-/// Packed into atomics because `param_changed` fires on the PipeWire thread and
-/// the TUI reads it on the render thread. Both fields are 0 until the first
-/// format negotiation completes.
 #[derive(Default)]
 struct SharedFormat {
     channels: AtomicU32,
@@ -62,8 +50,7 @@ impl CaptureHandle {
         self.channels() > 0
     }
 
-    /// Drain available samples into `out`, returning how many were written.
-    /// Samples are interleaved (frame-major): `[L0, R0, L1, R1, ...]`.
+    /// Drain available interleaved samples into `out`, returning how many.
     pub fn read(&mut self, out: &mut [f32]) -> usize {
         self.consumer.pop_slice(out)
     }
@@ -72,30 +59,20 @@ impl CaptureHandle {
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
         self.running.store(false, Ordering::Relaxed);
-        // The PipeWire main loop blocks on its own thread; signalling `running`
-        // isn't enough to wake it, so we can't cleanly join here without a loop
-        // signal. Detach rather than block forever on shutdown.
         if let Some(thread) = self.thread.take() {
-            // Best-effort: if the loop already exited, this returns promptly.
             let _ = thread;
         }
     }
 }
 
-/// User data carried through the PipeWire callbacks.
 struct CaptureState {
     info: spa::param::audio::AudioInfoRaw,
     format: Arc<SharedFormat>,
     producer: RingProducer,
-    /// Reused decode scratch so the RT process callback never allocates.
     scratch: Vec<f32>,
 }
 
 /// Start capturing system output on a dedicated PipeWire thread.
-///
-/// Returns immediately with a [`CaptureHandle`]; the stream negotiates format
-/// asynchronously, so poll [`CaptureHandle::is_ready`] before relying on
-/// [`CaptureHandle::channels`].
 pub fn start() -> CaptureHandle {
     let ring = Arc::new(HeapRb::<f32>::new(RING_CAPACITY));
     let (producer, consumer) = ring.split();
@@ -121,7 +98,6 @@ pub fn start() -> CaptureHandle {
     }
 }
 
-/// The PipeWire main loop, owned entirely by the capture thread.
 fn run_capture(
     producer: RingProducer,
     format: Arc<SharedFormat>,
@@ -132,8 +108,6 @@ fn run_capture(
     let context = pw::context::ContextRc::new(&mainloop, None)?;
     let core = context.connect_rc(None)?;
 
-    // STREAM_CAPTURE_SINK = true connects to a sink's MONITOR instead of a mic.
-    // With no TARGET_OBJECT, it follows the default sink: the active output.
     let mut props = properties! {
         *pw::keys::MEDIA_TYPE => "Audio",
         *pw::keys::MEDIA_CATEGORY => "Capture",
@@ -168,7 +142,6 @@ fn run_capture(
                 .info
                 .parse(param)
                 .expect("failed to parse AudioInfoRaw");
-            // Publish the negotiated layout for the consumer side.
             state
                 .format
                 .channels
@@ -190,9 +163,6 @@ fn run_capture(
             let n_samples = data.chunk().size() as usize / mem::size_of::<f32>();
             let Some(bytes) = data.data() else { return };
 
-            // Decode F32LE into reused scratch, then push the batch in one call.
-            // Batching keeps the RT callback to a single ring write instead of
-            // one atomic-fenced push per sample.
             state.scratch.clear();
             state.scratch.reserve(n_samples);
             for n in 0..n_samples {
@@ -201,12 +171,10 @@ fn run_capture(
                 let f = f32::from_le_bytes(bytes[start..end].try_into().unwrap());
                 state.scratch.push(f);
             }
-            // Overrun drops the tail: acceptable for a visualizer.
             let _ = state.producer.push_slice(&state.scratch);
         })
         .register()?;
 
-    // Negotiate F32LE; leave rate/channels empty to accept the native graph.
     let mut audio_info = spa::param::audio::AudioInfoRaw::new();
     audio_info.set_format(spa::param::audio::AudioFormat::F32LE);
     let obj = pw::spa::pod::Object {
@@ -231,6 +199,6 @@ fn run_capture(
         &mut params,
     )?;
 
-    mainloop.run(); // blocks until the process exits
+    mainloop.run();
     Ok(())
 }

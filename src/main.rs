@@ -23,32 +23,21 @@ use scope::WaveScope;
 use spectrum::Spectrum;
 use terrain::Terrain;
 
-/// Frequency range the spectrum spans, in Hz.
 const SPEC_MIN_HZ: f32 = 30.0;
 const SPEC_MAX_HZ: f32 = 16_000.0;
-/// Number of log-spaced spectrum bands.
 const N_BANDS: usize = 48;
 
-/// Zoom bounds: how many recent samples the waveform spans across the pane.
-/// Smaller = zoomed in (less history, more detail); larger = zoomed out.
-const WINDOW_MIN: usize = 480; // ~10ms @ 48k
-const WINDOW_MAX: usize = 24_000; // ~0.5s @ 48k (the history cap)
-const WINDOW_DEFAULT: usize = 4_800; // ~0.1s @ 48k
+const WINDOW_MIN: usize = 480;
+const WINDOW_MAX: usize = 24_000;
+const WINDOW_DEFAULT: usize = 4_800;
 
-/// Render cadence. We redraw on this timeout *or* whenever a key arrives, so
-/// input feels instant while the scope still animates at ~60fps when idle.
 const FRAME: Duration = Duration::from_millis(16);
 
-/// The active top-level view, selected via the function keys F1–F8. F1 is the
-/// default 3D spectral terrain; F2 is the combined waveform+spectrum view; F3–F8
-/// are stubbed placeholders to be filled in later.
+/// The active top-level view, selected via the function keys F1–F8.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum View {
-    /// F2: the original combined waveform + spectrum view.
     Combined,
-    /// F1: 3D spectral terrain flown forward through time.
     Terrain,
-    /// F3–F8: not yet implemented; render a placeholder.
     Stub(u8),
 }
 
@@ -76,15 +65,10 @@ impl View {
 /// Owns the render-side state the UI draws from each frame.
 struct App {
     wave: WaveScope,
-    /// Built lazily once the capture rate is known.
     spectrum: Option<Spectrum>,
-    /// Samples of history spanned across the waveform pane (zoom level).
     window: usize,
-    /// Channel currently displayed in both panes.
     channel: usize,
-    /// Active top-level view, switched with F1–F8.
     view: View,
-    /// Rolling 3D spectral terrain (F1). Built lazily alongside the spectrum.
     terrain: Option<Terrain>,
 }
 
@@ -100,9 +84,7 @@ impl App {
         }
     }
 
-    /// Pull fresh audio, (re)build the spectrum once the rate is known, and feed
-    /// the latest spectrum row into the terrain so its history scrolls forward
-    /// every frame regardless of which view is on screen.
+    /// Pull fresh audio, lazily build the spectrum, and feed the terrain a row.
     fn tick(&mut self) {
         self.wave.tick();
         if self.spectrum.is_none() && self.wave.is_ready() {
@@ -115,9 +97,6 @@ impl App {
             self.terrain = Some(Terrain::new(N_BANDS));
         }
 
-        // Advance the terrain's time axis with a fresh spectrum row. Computed
-        // here (not at render time) so the landscape keeps scrolling even while
-        // another view is displayed, and is ready the moment you switch to F1.
         if let (Some(spectrum), Some(terrain)) = (self.spectrum.as_mut(), self.terrain.as_mut()) {
             let bands = spectrum.compute(&self.wave, self.channel);
             let row: Vec<f32> = bands.iter().map(|b| b.magnitude).collect();
@@ -133,7 +112,6 @@ impl App {
         self.window = (self.window * 2).min(WINDOW_MAX);
     }
 
-    /// Cycle to the next channel, wrapping. No-op before a format is negotiated.
     fn next_channel(&mut self) {
         let n = self.wave.channel_count();
         if n > 0 {
@@ -158,7 +136,6 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
         app.tick();
         terminal.draw(|f| ui(f, &mut app))?;
 
-        // Block up to one frame for input; redraw on timeout to keep animating.
         if event::poll(FRAME)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
@@ -182,11 +159,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
 
 /// Draw the full frame: a status row, then the active view's body below it.
 fn ui(f: &mut Frame, app: &mut App) {
-    let chunks = Layout::vertical([
-        Constraint::Length(1), // status line
-        Constraint::Min(0),    // view body
-    ])
-    .split(f.area());
+    let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(f.area());
 
     render_status(f, chunks[0], app);
 
@@ -197,7 +170,6 @@ fn ui(f: &mut Frame, app: &mut App) {
     }
 }
 
-/// F1: the 3D spectral terrain.
 fn render_terrain(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default().borders(Borders::ALL).title("3D terrain");
     let inner = block.inner(area);
@@ -214,19 +186,13 @@ fn render_terrain(f: &mut Frame, area: Rect, app: &mut App) {
     }
 }
 
-/// F2: the combined waveform + spectrum view.
 fn render_combined(f: &mut Frame, area: Rect, app: &mut App) {
-    let chunks = Layout::vertical([
-        Constraint::Min(6), // waveform
-        Constraint::Min(6), // spectrum
-    ])
-    .split(area);
+    let chunks = Layout::vertical([Constraint::Min(6), Constraint::Min(6)]).split(area);
 
     render_waveform(f, chunks[0], app);
     render_spectrum(f, chunks[1], app);
 }
 
-/// Placeholder for an unimplemented F3–F8 view.
 fn render_stub(f: &mut Frame, area: Rect, n: u8) {
     let block = Block::default()
         .borders(Borders::ALL)
@@ -260,25 +226,20 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// Waveform as a braille Canvas: one vertical min→max line per column.
 fn render_waveform(f: &mut Frame, area: Rect, app: &App) {
     let block = Block::default().borders(Borders::ALL).title("waveform");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // One envelope column per braille x-cell pair; Canvas gives 2x horizontal
-    // resolution, so request 2 columns per terminal cell of width.
     let cols = (inner.width as usize * 2).max(1);
     let env = app.wave.envelope(app.channel, cols, app.window);
 
     let canvas = Canvas::default()
-        // y in [-1, 1] matches the f32 sample range; x in [0, cols).
         .x_bounds([0.0, cols as f64])
         .y_bounds([-1.0, 1.0])
         .paint(move |ctx| {
             for (i, e) in env.iter().enumerate() {
                 let x = i as f64;
-                // Draw the filled span from this column's min to its max.
                 ctx.draw(&CanvasLine {
                     x1: x,
                     y1: e.min as f64,
@@ -291,20 +252,16 @@ fn render_waveform(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(canvas, inner);
 }
 
-/// Spectrum as a vertical BarChart: one bar per log-spaced band.
 fn render_spectrum(f: &mut Frame, area: Rect, app: &mut App) {
     let block = Block::default().borders(Borders::ALL).title("spectrum");
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    // `tick` already recomputed the spectrum this frame (it feeds the terrain),
-    // so read the cached bands rather than running a second FFT here.
     let Some(spectrum) = app.spectrum.as_ref() else {
         return;
     };
     let bands = spectrum.bands();
 
-    // Scale normalized 0..=1 magnitudes to the pane height for bar values.
     let height = inner.height.max(1);
     let bars: Vec<Bar> = bands
         .iter()
@@ -325,18 +282,14 @@ fn render_spectrum(f: &mut Frame, area: Rect, app: &mut App) {
     f.render_widget(chart, inner);
 }
 
-/// Map a normalized intensity `0.0..=1.0` to a cold→hot heatmap color: blue for
-/// quiet bands, ramping through cyan/green/yellow to red at full scale. The ramp
-/// is piecewise-linear over RGB control points, which reads as a smooth gradient
-/// on a truecolor terminal.
+/// Map a normalized intensity `0.0..=1.0` to a cold→hot heatmap color.
 pub(crate) fn heat_color(t: f32) -> Color {
-    // Control points along the ramp, low intensity first.
     const STOPS: [(u8, u8, u8); 5] = [
-        (0, 0, 255),   // blue
-        (0, 255, 255), // cyan
-        (0, 255, 0),   // green
-        (255, 255, 0), // yellow
-        (255, 0, 0),   // red
+        (0, 0, 255),
+        (0, 255, 255),
+        (0, 255, 0),
+        (255, 255, 0),
+        (255, 0, 0),
     ];
     let t = t.clamp(0.0, 1.0);
     let segments = (STOPS.len() - 1) as f32;
