@@ -1,21 +1,19 @@
-[package]
-name = "termwaves"
-version = "0.1.0"
-edition = "2024"
+# Two pieces: the `termwaves` core library (audio capture + DSP) and the
+# `termwaves-client` terminal app you actually run. The client depends on the
+# lib by path; the lib depends on neither the client nor any UI stack.
+[workspace]
+resolver = "3"
+members = ["crates/termwaves", "client"]
+# Bare `cargo run` / `cargo build` from the root targets the client app.
+default-members = ["client"]
 
-# The library is the signal path only: PipeWire capture, history, FFT, spectrum.
-[dependencies]
+# Versions shared by both crates, pinned once here.
+[workspace.dependencies]
 pipewire = "0.10.0"
 ringbuf = "0.5.0"
-
-# The terminal UI lives in examples/, so its deps are dev-only — the lib itself
-# pulls in no rendering stack.
-[dev-dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
 
-# The terrain client. `examples/terrain/` is a multi-file example, so point Cargo
-# at its entrypoint explicitly. Run with `cargo run --example terrain`.
-[[example]]
-name = "terrain"
-path = "examples/terrain/main.rs"
+[workspace.package]
+version = "0.1.0"
+edition = "2024"

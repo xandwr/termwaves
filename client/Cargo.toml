@@ -1,0 +1,16 @@
+[package]
+name = "termwaves-client"
+version.workspace = true
+edition.workspace = true
+
+# The downloadable terminal app: a ratatui client that consumes the `termwaves`
+# core library. `cargo run -p termwaves-client` (or just `cargo run` from the
+# workspace root) launches it.
+[[bin]]
+name = "termwaves"
+path = "src/main.rs"
+
+[dependencies]
+termwaves = { path = "../crates/termwaves" }
+ratatui.workspace = true
+crossterm.workspace = true
