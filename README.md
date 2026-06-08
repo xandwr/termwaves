@@ -5,9 +5,9 @@ Real-time audio visualization in the terminal, driven by [PipeWire](https://pipe
 `termwaves` captures system audio via PipeWire and turns it into live oscilloscope
 and spectrum data. It ships as two crates:
 
-- **`termwaves`** — a library providing PipeWire capture, an FFT, a waveform scope,
+- **`termwaves`**: a library providing PipeWire capture, an FFT, a waveform scope,
   and a spectrum analyzer with no rendering dependencies of its own.
-- **`termwaves-client`** — a [ratatui](https://ratatui.rs/) TUI that renders the
+- **`termwaves-client`**: a [ratatui](https://ratatui.rs/) TUI that renders the
   visualizers, installed as the `termwaves` command.
 
 > **Platform:** Linux with PipeWire. The library links against the system PipeWire
