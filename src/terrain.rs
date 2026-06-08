@@ -79,6 +79,21 @@ const BALL_SPEAK_CHANCE: u32 = (u32::MAX as f64 * 0.004) as u32;
 /// Ticks a speech bubble stays up once a ball starts talking.
 const BALL_SPEAK_TICKS: u32 = 70;
 
+/// Starting per-tick rotation of the sample-write direction in rotary mode
+/// (radians ≈ 1.7°/tick).
+const YAW_SPEED_DEFAULT: f32 = 0.03;
+/// How much `[`/`]`] nudge the rotary speed each press (radians/tick).
+const YAW_SPEED_STEP: f32 = 0.01;
+/// Largest rotary speed `]` will reach, so the sweep stays readable.
+const YAW_SPEED_MAX: f32 = 0.3;
+/// Fraction of the persistent rotary field that survives each tick. The rest
+/// decays toward zero, so freshly-stamped audio fades behind the sweeping
+/// wavefront instead of accumulating forever.
+const FIELD_DECAY: f32 = 0.94;
+/// How strongly each tick's new spectrum stamp is blended into the field along
+/// the current write direction. Higher = brighter, more present wavefront.
+const FIELD_STAMP: f32 = 0.6;
+
 /// The things the little people say, picked at random.
 const PHRASES: &[&str] = &[
     "wheee!",
@@ -146,6 +161,22 @@ pub struct Terrain {
     /// Xorshift state driving the random speech timing. Seeded to a fixed
     /// nonzero constant; it just needs to look unpredictable, not be secure.
     rng: u32,
+    /// When true, the grid and camera stay fixed and incoming audio is stamped
+    /// onto a persistent 2D field along a *rotating direction*, so the wavefront
+    /// sweeps across the static plane instead of the geometry tumbling.
+    rotary: bool,
+    /// Direction the current spectrum row is written across the plane, in
+    /// radians. Advances by `yaw_speed` each tick while `rotary` is on.
+    yaw: f32,
+    /// Per-tick rotation of the write direction (radians). See `handle_key`.
+    yaw_speed: f32,
+    /// Persistent 2D height-field for rotary mode, `depth * width`, row-major by
+    /// `z`. New audio is stamped in along `yaw` each tick and the whole field
+    /// decays, so old imprints linger and form sweeps/spirals.
+    field: Vec<f32>,
+    /// Smoothed peak of `field`, normalizing rotary heights to full frame height
+    /// the same way `peak` does for the scrolling buffer.
+    field_peak: f32,
 }
 
 impl Terrain {
@@ -162,6 +193,11 @@ impl Terrain {
             peak: 1.0,
             balls: Self::spawn_balls(width, DEFAULT_DEPTH),
             rng: 0x9E3779B9,
+            rotary: false,
+            yaw: 0.0,
+            yaw_speed: YAW_SPEED_DEFAULT,
+            field: vec![0.0; DEFAULT_DEPTH * width],
+            field_peak: 1.0,
         }
     }
 
@@ -205,6 +241,8 @@ impl Terrain {
         }
         self.depth = depth;
         self.rows = vec![0.0; depth * self.width];
+        self.field = vec![0.0; depth * self.width];
+        self.field_peak = 1.0;
         self.head = 0;
         self.primed = false;
         self.centroid = 0.5;
@@ -231,6 +269,47 @@ impl Terrain {
         }
         self.head = (self.head + 1) % self.depth;
         self.primed = true;
+    }
+
+    /// Stamp the latest spectrum onto the persistent rotary field along the
+    /// current write direction `yaw`, then decay the whole field.
+    ///
+    /// The grid is treated as a static unit square centered at the origin. The
+    /// write direction `d = (cos yaw, sin yaw)` defines a moving ridge through the
+    /// center: a cell's distance *along* `d` picks how strongly it's stamped this
+    /// tick (a narrow band around the ridge), while its distance *across* `d`
+    /// selects which spectrum band's magnitude is deposited there. As `yaw`
+    /// rotates the ridge sweeps the plane, and `FIELD_DECAY` lets prior stamps
+    /// linger behind it as a fading spiral.
+    fn stamp_field(&mut self, magnitudes: &[f32]) {
+        let (s, c) = (self.yaw.sin(), self.yaw.cos());
+        // Width of the deposited ridge along the write direction, in centered
+        // units. A wider ridge paints more of the plane per tick.
+        const RIDGE: f32 = 0.18;
+        let last_x = (self.width - 1).max(1) as f32;
+        let last_z = (self.depth - 1).max(1) as f32;
+        let mut peak = 0.0f32;
+        for z in 0..self.depth {
+            let v = z as f32 / last_z - 0.5;
+            for x in 0..self.width {
+                let u = x as f32 / last_x - 0.5;
+                let along = u * c + v * s;
+                let across = -u * s + v * c;
+                // Map the across-axis (-0.5..=0.5) to a band index.
+                let band_pos = (across + 0.5).clamp(0.0, 1.0);
+                let band = (band_pos * last_x).round() as usize;
+                let mag = magnitudes.get(band).copied().unwrap_or(0.0);
+                // Gaussian ridge: strongest on the line through center along `d`.
+                let weight = (-(along * along) / (RIDGE * RIDGE)).exp();
+                let cell = z * self.width + x;
+                let deposit = mag * weight * FIELD_STAMP;
+                let val = (self.field[cell] * FIELD_DECAY + deposit).min(4.0);
+                self.field[cell] = val;
+                peak = peak.max(val);
+            }
+        }
+        // EMA the field peak so quiet stretches normalize up without flicker.
+        self.field_peak += ADAPT_ALPHA * (peak - self.field_peak);
     }
 
     /// Re-measure the adaptive emphasis from the whole ring buffer and ease the
@@ -274,10 +353,19 @@ impl Terrain {
 
     /// Stored magnitude for row `r`, band `x`, after adaptive emphasis and
     /// peak-normalization. This is the value the wireframe and color see.
+    ///
+    /// In normal mode this reads the scrolling ring buffer (row `r` = how long
+    /// ago). In rotary mode the plane is static, so `r` indexes the persistent
+    /// field directly by `z` with no scroll offset, and the emphasis tilt is
+    /// dropped — the rotating stamp already places energy across the plane.
     fn height(&self, r: usize, x: usize) -> f32 {
+        if self.rotary {
+            let raw = self.field[r * self.width + x];
+            return (raw / self.field_peak.max(PEAK_FLOOR)).min(1.0);
+        }
+        let norm = self.peak.max(PEAK_FLOOR);
         let ring = (self.head + self.depth - 1 - r) % self.depth;
         let raw = self.rows[ring * self.width + x];
-        let norm = self.peak.max(PEAK_FLOOR);
         (raw * self.emphasis(x) / norm).min(1.0)
     }
 
@@ -286,7 +374,9 @@ impl Terrain {
     /// interior is pulled up by a smooth hump, so the middle rises like an island
     /// in water. Shallow landscapes are left untouched (factor `1.0`).
     fn island_factor(&self, r: usize) -> f32 {
-        if self.depth < ISLAND_MIN_DEPTH {
+        // Rotary mode keeps a flat static plane; the depth-pinning hump only makes
+        // sense for the scrolling island.
+        if self.rotary || self.depth < ISLAND_MIN_DEPTH {
             return 1.0;
         }
         // Normalize row to 0..=1 across the depth, then a sine hump that is 0 at
@@ -516,7 +606,8 @@ impl Terrain {
 
         let width = self.width;
         let depth = self.depth;
-        // Project a world-space point to screen pixels.
+        // Project a world-space point to screen pixels. The plane and camera are
+        // fixed; in rotary mode the motion lives in the height-field, not here.
         let project = |wx: f32, wy: f32, wz: f32| -> Option<(f64, f64)> {
             let ex = wx;
             let ty = wy - CAM_HEIGHT;
@@ -619,16 +710,27 @@ impl View for Terrain {
     }
 
     fn tick(&mut self, ctx: &Ctx) {
+        // Advance the rotary write-direction first so this tick's audio stamps at
+        // the new angle. Spins even in silence so the sweep keeps turning.
+        if self.rotary {
+            self.yaw = (self.yaw + self.yaw_speed).rem_euclid(std::f32::consts::TAU);
+        }
         if let Some(spectrum) = ctx.spectrum {
             let row: Vec<f32> = spectrum.bands().iter().map(|b| b.magnitude).collect();
+            // `push`/`adapt` keep the scrolling buffer and peak normalization live
+            // in both modes; rotary mode additionally stamps the persistent field.
             self.push(&row);
             self.adapt();
+            if self.rotary {
+                self.stamp_field(&row);
+            }
             self.step_balls();
         }
     }
 
     /// Keys 1-9 set the landscape depth (number of rows) to twice that value,
     /// so `5` gives a depth of 10, `9` gives 18, etc. Delete removes every ball.
+    /// `r` toggles rotary mode; `[` / `]` slow down / speed up its spin.
     fn handle_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Char(c @ '1'..='9') => {
@@ -637,6 +739,23 @@ impl View for Terrain {
             }
             KeyCode::Delete => {
                 self.balls.clear();
+                true
+            }
+            KeyCode::Char('r') => {
+                self.rotary = !self.rotary;
+                if self.rotary {
+                    // Start from a clean plane each time the sweep is engaged.
+                    self.field.iter_mut().for_each(|c| *c = 0.0);
+                    self.field_peak = 1.0;
+                }
+                true
+            }
+            KeyCode::Char(']') => {
+                self.yaw_speed = (self.yaw_speed + YAW_SPEED_STEP).min(YAW_SPEED_MAX);
+                true
+            }
+            KeyCode::Char('[') => {
+                self.yaw_speed = (self.yaw_speed - YAW_SPEED_STEP).max(-YAW_SPEED_MAX);
                 true
             }
             _ => false,
