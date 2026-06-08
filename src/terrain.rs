@@ -48,6 +48,10 @@ const LIGHT_DIR: (f32, f32, f32) = (-0.5, 0.8, 0.5);
 /// Ambient floor so faces turned away from the light stay visible instead of
 /// going pure black.
 const AMBIENT: f32 = 0.2;
+/// Above this depth the terrain becomes an "island": the nearest and furthest
+/// rows are pinned to y=0 and a smooth envelope tugs the interior rows down so
+/// only the middle of the landscape rises, like land surrounded by water.
+const ISLAND_MIN_DEPTH: usize = 6;
 
 /// A rolling 3D height-field built from successive spectrum rows.
 pub struct Terrain {
@@ -161,12 +165,26 @@ impl Terrain {
         (raw * self.emphasis(x) / norm).min(1.0)
     }
 
+    /// Depth-wise height envelope. For deep landscapes (`depth >= ISLAND_MIN_DEPTH`)
+    /// the nearest (`r=0`) and furthest (`r=depth-1`) rows are pinned to 0 and the
+    /// interior is pulled up by a smooth hump, so the middle rises like an island
+    /// in water. Shallow landscapes are left untouched (factor `1.0`).
+    fn island_factor(&self, r: usize) -> f32 {
+        if self.depth < ISLAND_MIN_DEPTH {
+            return 1.0;
+        }
+        // Normalize row to 0..=1 across the depth, then a sine hump that is 0 at
+        // both edges and 1 in the middle.
+        let t = r as f32 / (self.depth - 1) as f32;
+        (t * std::f32::consts::PI).sin()
+    }
+
     /// World-space position of grid vertex `(x, r)`: `x` across the bands, the
     /// rendered height up, and `r` receding from the camera. The projection in
     /// `render_wireframe` consumes these, and face normals are built from them.
     fn world(&self, x: usize, r: usize) -> (f32, f32, f32) {
         let wx = (x as f32 / (self.width - 1) as f32 - 0.5) * 2.0 * WORLD_HALF_WIDTH;
-        let wy = self.height(r, x).powf(SPIKE_GAMMA) * PEAK_HEIGHT;
+        let wy = self.height(r, x).powf(SPIKE_GAMMA) * PEAK_HEIGHT * self.island_factor(r);
         let wz = r as f32;
         (wx, wy, wz)
     }
@@ -317,10 +335,11 @@ impl View for Terrain {
         }
     }
 
-    /// Keys 1-9 set the landscape depth (number of rows) to that value.
+    /// Keys 1-9 set the landscape depth (number of rows) to twice that value,
+    /// so `5` gives a depth of 10, `9` gives 18, etc.
     fn handle_key(&mut self, code: KeyCode) -> bool {
         if let KeyCode::Char(c @ '1'..='9') = code {
-            self.set_depth(c as usize - '0' as usize);
+            self.set_depth((c as usize - '0' as usize) * 2);
             return true;
         }
         false
