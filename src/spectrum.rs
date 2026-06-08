@@ -11,7 +11,6 @@ const ADAPTIVE_GAIN_CLAMP_DB: f32 = 12.0;
 /// One frequency band: center frequency and `0.0..=1.0` normalized magnitude.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Band {
-    #[allow(dead_code)]
     pub center_hz: f32,
     pub magnitude: f32,
 }

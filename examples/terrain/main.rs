@@ -1,9 +1,5 @@
-mod audio;
 mod color;
 mod combined;
-mod fft;
-mod scope;
-mod spectrum;
 mod terrain;
 mod view;
 
@@ -18,9 +14,9 @@ use crossterm::{
 use ratatui::prelude::*;
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use termwaves::{Spectrum, WaveScope};
+
 use combined::Combined;
-use scope::WaveScope;
-use spectrum::Spectrum;
 use terrain::Terrain;
 use view::{Ctx, Placeholder, View};
 
@@ -153,7 +149,7 @@ impl App {
 }
 
 fn main() -> io::Result<()> {
-    let handle = audio::start();
+    let handle = termwaves::start();
     let app = App::new(WaveScope::new(handle));
 
     let mut terminal = setup_terminal()?;

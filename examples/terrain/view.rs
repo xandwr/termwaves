@@ -13,8 +13,7 @@ use ratatui::{
     widgets::{Block, Borders},
 };
 
-use crate::scope::WaveScope;
-use crate::spectrum::Spectrum;
+use termwaves::{Spectrum, WaveScope};
 
 /// Everything a view may read while ticking or rendering: the live audio model,
 /// the (possibly not-yet-ready) spectrum, and the current channel/zoom.

@@ -27,7 +27,6 @@ impl Fft {
     }
 
     /// FFT size.
-    #[allow(dead_code)] // used in tests; public accessor for future views
     pub fn len(&self) -> usize {
         self.re.len()
     }
