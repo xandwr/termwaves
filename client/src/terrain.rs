@@ -1,5 +1,3 @@
-//! 3D spectral terrain: the F1 view.
-
 use ratatui::{
     prelude::*,
     widgets::canvas::{Canvas, Line as CanvasLine},
@@ -10,8 +8,6 @@ use crossterm::event::KeyCode;
 use crate::color::surface_color;
 use crate::view::{Ctx, View, framed, placeholder_text};
 
-/// Default number of spectrum rows held in the rolling landscape. Keys 1-9
-/// rebind this live; see [`Terrain::handle_key`].
 const DEFAULT_DEPTH: usize = 9;
 const PEAK_HEIGHT: f32 = 4.0;
 const SPIKE_GAMMA: f32 = 2.4;
@@ -19,88 +15,38 @@ const CAM_HEIGHT: f32 = 2.0;
 const CAM_SETBACK: f32 = 10.0;
 const CAM_PITCH: f32 = 0.66;
 const FOCAL: f32 = 2.4;
-/// Half the terrain's world-space span. The band index maps to
-/// `[-WORLD_HALF_WIDTH, +WORLD_HALF_WIDTH]`, so raising this widens the
-/// landscape physically without moving the camera.
 const WORLD_HALF_WIDTH: f32 = 1.4;
-/// Vertical NDC offset that recenters the downward-pitched view so the ground
-/// plane lands inside the frame instead of clipping off the bottom.
 const HORIZON_LIFT: f32 = 2.0;
-/// EMA factor for per-band height smoothing: each tick a band eases this
-/// fraction of the way toward the new magnitude. Higher = snappier, lower =
-/// smoother. 1.0 disables smoothing (raw passthrough).
 const SMOOTHING: f32 = 0.33;
-/// EMA factor for the adaptive emphasis (centroid + peak). Low and slow so the
-/// terrain breathes toward the current material instead of flickering on
-/// transients.
 const ADAPT_ALPHA: f32 = 0.01;
-/// Strongest per-band height multiplier the energy-tilt can apply at the far
-/// end of the spectrum. 1.0 = no tilt; higher leans harder toward wherever the
-/// buffer's energy currently sits.
 const TILT_STRENGTH: f32 = 1.0;
-/// Floor for the peak-normalization divisor, so a near-silent buffer doesn't
-/// blow tiny magnitudes up to full height (and divide-by-zero).
 const PEAK_FLOOR: f32 = 0.001;
-/// Direction the scene light comes from, in world space (x: across bands,
-/// y: up, z: toward camera). Faces whose normal aligns with this are brightest.
-/// Normalized at use.
 const LIGHT_DIR: (f32, f32, f32) = (-0.5, 0.8, 0.5);
-/// Ambient floor so faces turned away from the light stay visible instead of
-/// going pure black.
 const AMBIENT: f32 = 0.2;
-/// Above this depth the terrain becomes an "island": the nearest and furthest
-/// rows are pinned to y=0 and a smooth envelope tugs the interior rows down so
-/// only the middle of the landscape rises, like land surrounded by water.
 const ISLAND_MIN_DEPTH: usize = 6;
 
-/// Starting per-tick rotation of the sample-write direction in rotary mode
-/// (radians ≈ 1.7°/tick).
 const YAW_SPEED_DEFAULT: f32 = 0.03;
-/// How much `[`/`]`] nudge the rotary speed each press (radians/tick).
 const YAW_SPEED_STEP: f32 = 0.01;
-/// Largest rotary speed `]` will reach, so the sweep stays readable.
 const YAW_SPEED_MAX: f32 = 0.3;
-/// Fraction of the persistent rotary field that survives each tick. The rest
-/// decays toward zero, so freshly-stamped audio fades behind the sweeping
-/// wavefront instead of accumulating forever.
 const FIELD_DECAY: f32 = 0.94;
-/// How strongly each tick's new spectrum stamp is blended into the field along
-/// the current write direction. Higher = brighter, more present wavefront.
 const FIELD_STAMP: f32 = 0.6;
 
-/// A rolling 3D height-field built from successive spectrum rows.
 pub struct Terrain {
     rows: Vec<f32>,
     width: usize,
     depth: usize,
     head: usize,
     primed: bool,
-    /// Smoothed spectral centroid of the whole ring, `0.0` (all-low) ..= `1.0`
-    /// (all-high). Drives the energy-tilt in [`Terrain::emphasis`].
     centroid: f32,
-    /// Smoothed peak height across the ring, used to normalize quiet passages up
-    /// to full frame height.
     peak: f32,
-    /// When true, the grid and camera stay fixed and incoming audio is stamped
-    /// onto a persistent 2D field along a *rotating direction*, so the wavefront
-    /// sweeps across the static plane instead of the geometry tumbling.
     rotary: bool,
-    /// Direction the current spectrum row is written across the plane, in
-    /// radians. Advances by `yaw_speed` each tick while `rotary` is on.
     yaw: f32,
-    /// Per-tick rotation of the write direction (radians). See `handle_key`.
     yaw_speed: f32,
-    /// Persistent 2D height-field for rotary mode, `depth * width`, row-major by
-    /// `z`. New audio is stamped in along `yaw` each tick and the whole field
-    /// decays, so old imprints linger and form sweeps/spirals.
     field: Vec<f32>,
-    /// Smoothed peak of `field`, normalizing rotary heights to full frame height
-    /// the same way `peak` does for the scrolling buffer.
     field_peak: f32,
 }
 
 impl Terrain {
-    /// Build an empty terrain holding rows of `width` bands.
     pub fn new(width: usize) -> Self {
         let width = width.max(1);
         Self {
@@ -119,8 +65,6 @@ impl Terrain {
         }
     }
 
-    /// Resize the landscape to `depth` rows, clearing it. The next pushes
-    /// refill the (smaller or larger) ring from scratch.
     fn set_depth(&mut self, depth: usize) {
         if depth == self.depth {
             return;
@@ -135,11 +79,6 @@ impl Terrain {
         self.peak = 1.0;
     }
 
-    /// Push the latest spectrum row, scrolling the landscape toward the camera.
-    ///
-    /// The new front row is the previous front row's heights eased a `SMOOTHING`
-    /// fraction toward `magnitudes`, so each band rises and falls smoothly
-    /// instead of snapping to every frame.
     fn push(&mut self, magnitudes: &[f32]) {
         let prev = (self.head + self.depth - 1) % self.depth;
         let base = self.head * self.width;
@@ -156,20 +95,8 @@ impl Terrain {
         self.primed = true;
     }
 
-    /// Stamp the latest spectrum onto the persistent rotary field along the
-    /// current write direction `yaw`, then decay the whole field.
-    ///
-    /// The grid is treated as a static unit square centered at the origin. The
-    /// write direction `d = (cos yaw, sin yaw)` defines a moving ridge through the
-    /// center: a cell's distance *along* `d` picks how strongly it's stamped this
-    /// tick (a narrow band around the ridge), while its distance *across* `d`
-    /// selects which spectrum band's magnitude is deposited there. As `yaw`
-    /// rotates the ridge sweeps the plane, and `FIELD_DECAY` lets prior stamps
-    /// linger behind it as a fading spiral.
     fn stamp_field(&mut self, magnitudes: &[f32]) {
         let (s, c) = (self.yaw.sin(), self.yaw.cos());
-        // Width of the deposited ridge along the write direction, in centered
-        // units. A wider ridge paints more of the plane per tick.
         const RIDGE: f32 = 0.18;
         let last_x = (self.width - 1).max(1) as f32;
         let last_z = (self.depth - 1).max(1) as f32;
@@ -180,11 +107,9 @@ impl Terrain {
                 let u = x as f32 / last_x - 0.5;
                 let along = u * c + v * s;
                 let across = -u * s + v * c;
-                // Map the across-axis (-0.5..=0.5) to a band index.
                 let band_pos = (across + 0.5).clamp(0.0, 1.0);
                 let band = (band_pos * last_x).round() as usize;
                 let mag = magnitudes.get(band).copied().unwrap_or(0.0);
-                // Gaussian ridge: strongest on the line through center along `d`.
                 let weight = (-(along * along) / (RIDGE * RIDGE)).exp();
                 let cell = z * self.width + x;
                 let deposit = mag * weight * FIELD_STAMP;
@@ -193,16 +118,9 @@ impl Terrain {
                 peak = peak.max(val);
             }
         }
-        // EMA the field peak so quiet stretches normalize up without flicker.
         self.field_peak += ADAPT_ALPHA * (peak - self.field_peak);
     }
 
-    /// Re-measure the adaptive emphasis from the whole ring buffer and ease the
-    /// smoothed `centroid`/`peak` toward it. Called once per tick after `push`.
-    ///
-    /// `centroid` is the energy-weighted mean band position (0 = all-low,
-    /// 1 = all-high); `peak` is the loudest stored height. Both are EMA'd by
-    /// `ADAPT_ALPHA` so the terrain breathes toward the current material.
     fn adapt(&mut self) {
         if !self.primed || self.width < 2 {
             return;
@@ -214,7 +132,6 @@ impl Terrain {
         for ring in 0..self.depth {
             for x in 0..self.width {
                 let m = self.rows[ring * self.width + x];
-                // Square so loud bands dominate the centroid (perceived energy).
                 let e = m * m;
                 energy += e;
                 weighted += e * (x as f32 / span);
@@ -226,23 +143,12 @@ impl Terrain {
         self.peak += ADAPT_ALPHA * (peak - self.peak);
     }
 
-    /// Per-band height multiplier: tilt energy toward where the buffer's energy
-    /// sits (low `centroid` lifts low bands, high `centroid` lifts high bands).
     fn emphasis(&self, x: usize) -> f32 {
         let pos = x as f32 / (self.width - 1).max(1) as f32;
-        // Peaks at the band where the buffer's energy sits, fading to neutral
-        // one full spectrum-width away.
         let alignment = (1.0 - (pos - self.centroid).abs()).max(0.0);
         1.0 + (TILT_STRENGTH - 1.0) * alignment
     }
 
-    /// Stored magnitude for row `r`, band `x`, after adaptive emphasis and
-    /// peak-normalization. This is the value the wireframe and color see.
-    ///
-    /// In normal mode this reads the scrolling ring buffer (row `r` = how long
-    /// ago). In rotary mode the plane is static, so `r` indexes the persistent
-    /// field directly by `z` with no scroll offset, and the emphasis tilt is
-    /// dropped — the rotating stamp already places energy across the plane.
     fn height(&self, r: usize, x: usize) -> f32 {
         if self.rotary {
             let raw = self.field[r * self.width + x];
@@ -254,30 +160,18 @@ impl Terrain {
         (raw * self.emphasis(x) / norm).min(1.0)
     }
 
-    /// Depth-wise height envelope. For deep landscapes (`depth >= ISLAND_MIN_DEPTH`)
-    /// the nearest (`r=0`) and furthest (`r=depth-1`) rows are pinned to 0 and the
-    /// interior is pulled up by a smooth hump, so the middle rises like an island
-    /// in water. Shallow landscapes are left untouched (factor `1.0`).
     fn island_factor(&self, r: usize) -> f32 {
-        // Rotary mode keeps a flat static plane; the depth-pinning hump only makes
-        // sense for the scrolling island.
         if self.rotary || self.depth < ISLAND_MIN_DEPTH {
             return 1.0;
         }
-        // Normalize row to 0..=1 across the depth, then a sine hump that is 0 at
-        // both edges and 1 in the middle.
         let t = r as f32 / (self.depth - 1) as f32;
         (t * std::f32::consts::PI).sin()
     }
 
-    /// Rendered surface height (the `wy` of [`world`]) at grid vertex `(x, r)`.
     fn surface_y(&self, x: usize, r: usize) -> f32 {
         self.height(r, x).powf(SPIKE_GAMMA) * PEAK_HEIGHT * self.island_factor(r)
     }
 
-    /// World-space position of grid vertex `(x, r)`: `x` across the bands, the
-    /// rendered height up, and `r` receding from the camera. The projection in
-    /// `render_wireframe` consumes these, and face normals are built from them.
     fn world(&self, x: usize, r: usize) -> (f32, f32, f32) {
         let wx = (x as f32 / (self.width - 1) as f32 - 0.5) * 2.0 * WORLD_HALF_WIDTH;
         let wy = self.surface_y(x, r);
@@ -285,9 +179,6 @@ impl Terrain {
         (wx, wy, wz)
     }
 
-    /// Lambert brightness of the quad face whose near-left corner is `(x, r)`.
-    /// The normal is the cross product of the face's two world-space edges; the
-    /// shade is `max(AMBIENT, n·light)`. Returns `None` past the grid edge.
     fn face_shade(&self, x: usize, r: usize) -> Option<f32> {
         if x + 1 >= self.width || r + 1 >= self.depth {
             return None;
@@ -295,10 +186,8 @@ impl Terrain {
         let a = self.world(x, r);
         let b = self.world(x + 1, r);
         let c = self.world(x, r + 1);
-        // Two edges of the quad sharing corner `a`.
         let e1 = (b.0 - a.0, b.1 - a.1, b.2 - a.2);
         let e2 = (c.0 - a.0, c.1 - a.1, c.2 - a.2);
-        // n = e1 × e2, oriented so the +y component faces up toward the light.
         let mut n = (
             e1.1 * e2.2 - e1.2 * e2.1,
             e1.2 * e2.0 - e1.0 * e2.2,
@@ -314,13 +203,7 @@ impl Terrain {
         Some(dot.max(0.0).mul_add(1.0 - AMBIENT, AMBIENT))
     }
 
-    /// Shade for an edge, averaged over the (up to two) faces it borders. `(x, r)`
-    /// is the edge's lower-left endpoint; `along_x` picks the band-wise edge
-    /// (`true`) or the depth-wise edge (`false`). Falls back to a flat shade
-    /// when no face exists (e.g. depth 1, or the grid border).
     fn edge_shade(&self, x: usize, r: usize, along_x: bool) -> f32 {
-        // A band-wise edge is shared by the faces in front of and behind it;
-        // a depth-wise edge by the faces to its left and right.
         let (a, b) = if along_x {
             (
                 self.face_shade(x, r),
@@ -339,7 +222,6 @@ impl Terrain {
         }
     }
 
-    /// Render the terrain wireframe into `area`.
     fn render_wireframe(&self, f: &mut Frame, area: Rect) {
         if !self.primed || self.width < 2 {
             return;
@@ -349,14 +231,10 @@ impl Terrain {
         let sy = (area.height as f64 * 4.0).max(1.0);
 
         const CELL_ASPECT: f64 = 2.0;
-        // Cancels the unequal sx/sy pixel scaling applied at the ndc->px step
-        // (and the 2:1 terminal-cell aspect) so a world-space square stays square.
         let aspect = (sy / sx) * (CELL_ASPECT * CELL_ASPECT);
 
         let width = self.width;
         let depth = self.depth;
-        // Project a world-space point to screen pixels. The plane and camera are
-        // fixed; in rotary mode the motion lives in the height-field, not here.
         let project = |wx: f32, wy: f32, wz: f32| -> Option<(f64, f64)> {
             let ex = wx;
             let ty = wy - CAM_HEIGHT;
@@ -425,15 +303,11 @@ impl View for Terrain {
     }
 
     fn tick(&mut self, ctx: &Ctx) {
-        // Advance the rotary write-direction first so this tick's audio stamps at
-        // the new angle. Spins even in silence so the sweep keeps turning.
         if self.rotary {
             self.yaw = (self.yaw + self.yaw_speed).rem_euclid(std::f32::consts::TAU);
         }
         if let Some(spectrum) = ctx.spectrum {
             let row: Vec<f32> = spectrum.bands().iter().map(|b| b.magnitude).collect();
-            // `push`/`adapt` keep the scrolling buffer and peak normalization live
-            // in both modes; rotary mode additionally stamps the persistent field.
             self.push(&row);
             self.adapt();
             if self.rotary {
@@ -442,9 +316,6 @@ impl View for Terrain {
         }
     }
 
-    /// Keys 1-9 set the landscape depth (number of rows) to twice that value,
-    /// so `5` gives a depth of 10, `9` gives 18, etc.
-    /// `r` toggles rotary mode; `[` / `]` slow down / speed up its spin.
     fn handle_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Char(c @ '1'..='9') => {
@@ -454,7 +325,6 @@ impl View for Terrain {
             KeyCode::Char('r') => {
                 self.rotary = !self.rotary;
                 if self.rotary {
-                    // Start from a clean plane each time the sweep is engaged.
                     self.field.iter_mut().for_each(|c| *c = 0.0);
                     self.field_peak = 1.0;
                 }

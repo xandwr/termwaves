@@ -1,5 +1,3 @@
-//! Log-spaced frequency spectrum, the second view the TUI renders from.
-
 use crate::fft::Fft;
 use crate::scope::WaveScope;
 
@@ -8,14 +6,12 @@ const DB_FLOOR: f32 = -64.0;
 const LOUDNESS_EMA_ALPHA: f32 = 0.001;
 const ADAPTIVE_GAIN_CLAMP_DB: f32 = 12.0;
 
-/// One frequency band: center frequency and `0.0..=1.0` normalized magnitude.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Band {
     pub center_hz: f32,
     pub magnitude: f32,
 }
 
-/// Computes a log-spaced magnitude spectrum from a [`WaveScope`] channel.
 pub struct Spectrum {
     fft: Fft,
     samples: Vec<f32>,
@@ -27,7 +23,6 @@ pub struct Spectrum {
 }
 
 impl Spectrum {
-    /// Build a spectrum with `n_bands` log-spaced bands over `min_hz..=max_hz`.
     pub fn new(sample_rate: u32, n_bands: usize, min_hz: f32, max_hz: f32) -> Self {
         let n = FFT_SIZE;
 
@@ -67,7 +62,6 @@ impl Spectrum {
         }
     }
 
-    /// Recompute the spectrum from the most recent audio on `channel`.
     pub fn compute(&mut self, scope: &WaveScope, channel: usize) -> &[Band] {
         let n = self.samples.len();
 
@@ -120,13 +114,11 @@ impl Spectrum {
         &self.bands
     }
 
-    /// The most recently computed bands (low frequency first).
     pub fn bands(&self) -> &[Band] {
         &self.bands
     }
 }
 
-/// Convert a linear magnitude to `0.0..=1.0`, applying `gain_db` before normalizing.
 fn to_db_normalized(mag: f32, gain_db: f32) -> f32 {
     if mag <= 0.0 {
         return 0.0;
@@ -135,7 +127,6 @@ fn to_db_normalized(mag: f32, gain_db: f32) -> f32 {
     ((db - DB_FLOOR) / -DB_FLOOR).clamp(0.0, 1.0)
 }
 
-/// A-weighting gain in dB at frequency `f` (Hz), the IEC 61672 curve.
 fn a_weight_db(f: f32) -> f32 {
     let f2 = f * f;
     let num = 12194.0f32.powi(2) * f2 * f2;

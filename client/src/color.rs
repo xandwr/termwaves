@@ -1,16 +1,8 @@
-//! Shared color mapping for the visualizations.
-
 use ratatui::style::Color;
 
-/// Color of fully-shadowed terrain faces (a deep purple) and fully-lit ones
-/// (Light Cornflower Blue, `#93CCEA`). The surface ramps between these by the
-/// surface-normal brightness. Swap these to recolor the whole landscape.
 const SURFACE_SHADOW: (u8, u8, u8) = (80, 0, 40);
 const SURFACE_HIGHLIGHT: (u8, u8, u8) = (0, 250, 255);
 
-/// Shade a terrain face by a `0.0..=1.0` brightness (typically a Lambert `n·l`
-/// term), interpolating from the purple shadow color to the cornflower-blue
-/// highlight.
 pub fn surface_color(brightness: f32) -> Color {
     let b = brightness.clamp(0.0, 1.0);
     let (sr, sg, sb) = SURFACE_SHADOW;
@@ -19,7 +11,6 @@ pub fn surface_color(brightness: f32) -> Color {
     Color::Rgb(lerp(sr, hr), lerp(sg, hg), lerp(sb, hb))
 }
 
-/// Map a normalized intensity `0.0..=1.0` to a cold→hot heatmap color.
 pub fn heat_color(t: f32) -> Color {
     const STOPS: [(u8, u8, u8); 5] = [
         (0, 0, 255),

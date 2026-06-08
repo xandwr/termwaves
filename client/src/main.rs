@@ -30,7 +30,6 @@ const WINDOW_DEFAULT: usize = 4_800;
 
 const FRAME: Duration = Duration::from_millis(16);
 
-/// A modal panel drawn over the active view. `None` means just the view.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Overlay {
     None,
@@ -38,7 +37,6 @@ enum Overlay {
     Settings,
 }
 
-/// Owns the shared DSP engine and the list of selectable views.
 struct App {
     wave: WaveScope,
     spectrum: Option<Spectrum>,
@@ -51,7 +49,6 @@ struct App {
 
 impl App {
     fn new(wave: WaveScope) -> Self {
-        // Order here is the function-key order: F1, F2, F3…
         let views: Vec<Box<dyn View>> = vec![
             Box::new(Terrain::new(N_BANDS)),
             Box::new(Combined),
@@ -73,7 +70,6 @@ impl App {
         }
     }
 
-    /// Borrow the current channel/zoom and DSP state as a render context.
     fn ctx(&self) -> Ctx<'_> {
         Ctx {
             wave: &self.wave,
@@ -83,7 +79,6 @@ impl App {
         }
     }
 
-    /// Pull fresh audio, lazily build the spectrum, and tick every view.
     fn tick(&mut self) {
         self.wave.tick();
         if self.spectrum.is_none() && self.wave.is_ready() {
@@ -109,7 +104,6 @@ impl App {
         }
     }
 
-    /// Select the view bound to function key `n` (1-based), if one exists.
     fn select_fkey(&mut self, n: u8) {
         let idx = (n as usize).wrapping_sub(1);
         if idx < self.views.len() {
@@ -132,8 +126,6 @@ impl App {
         }
     }
 
-    /// Toggle an overlay: pressing its key again (or opening a different one)
-    /// closes the current panel.
     fn toggle_overlay(&mut self, overlay: Overlay) {
         self.overlay = if self.overlay == overlay {
             Overlay::None
@@ -142,7 +134,6 @@ impl App {
         };
     }
 
-    /// Forward a key the global loop didn't claim to the active view.
     fn forward_key(&mut self, code: KeyCode) {
         self.views[self.active].handle_key(code);
     }
@@ -158,7 +149,6 @@ fn main() -> io::Result<()> {
     result
 }
 
-/// Event loop: tick + redraw on each frame timeout, handle keys as they arrive.
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::Result<()> {
     loop {
         app.tick();
@@ -169,7 +159,6 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
             && key.kind == KeyEventKind::Press
         {
             match key.code {
-                // Esc closes an open overlay before it quits the app.
                 KeyCode::Esc if app.overlay != Overlay::None => app.overlay = Overlay::None,
                 KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
                 KeyCode::F(9) => app.toggle_overlay(Overlay::Help),
@@ -184,7 +173,6 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
     }
 }
 
-/// Draw the full frame: a status row, the active view's body, and any overlay.
 fn ui(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).split(f.area());
 
@@ -217,7 +205,6 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
     );
 }
 
-/// A centered modal panel: title + lines, sized to fit, drawn over `area`.
 fn render_overlay(f: &mut Frame, area: Rect, title: &str, lines: Vec<Line>) {
     let content_w = lines
         .iter()

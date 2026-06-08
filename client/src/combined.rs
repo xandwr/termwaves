@@ -1,5 +1,3 @@
-//! The combined waveform + spectrum view.
-
 use ratatui::{
     prelude::*,
     widgets::{
@@ -11,7 +9,6 @@ use ratatui::{
 use crate::color::heat_color;
 use crate::view::{Ctx, View, framed};
 
-/// Stacked oscilloscope (top) and log-spaced spectrum bars (bottom).
 pub struct Combined;
 
 impl View for Combined {

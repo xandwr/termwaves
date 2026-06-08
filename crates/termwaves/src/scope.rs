@@ -1,10 +1,7 @@
-//! Waveform model the TUI renders from.
-
 use crate::audio::CaptureHandle;
 
 const HISTORY_PER_CHANNEL: usize = 24_000;
 
-/// One column of a rendered waveform: min and max sample over its slice.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Envelope {
     pub min: f32,
@@ -12,7 +9,6 @@ pub struct Envelope {
 }
 
 impl Envelope {
-    /// Peak magnitude in this column, in `0.0..=1.0` for in-range audio.
     pub fn peak(&self) -> f32 {
         self.min.abs().max(self.max.abs())
     }
@@ -22,9 +18,6 @@ struct ChannelHistory {
     buf: Vec<f32>,
     head: usize,
     filled: bool,
-    /// Min/max summary pyramid over the *logical* (oldest-first) history.
-    /// `mips[0]` is one envelope per sample; each higher level halves the
-    /// count by merging adjacent pairs. Rebuilt lazily when `dirty`.
     mips: Vec<Vec<Envelope>>,
     dirty: bool,
 }
@@ -73,12 +66,8 @@ impl ChannelHistory {
         }
     }
 
-    /// Rebuild the min/max summary pyramid from the current ring contents.
-    /// O(len) total across all levels (geometric series). Called at most once
-    /// per `tick`, regardless of how many frames are rendered in between.
     fn rebuild_mips(&mut self) {
         let len = self.len();
-        // Level 0: one envelope per logical sample, oldest first.
         let mut level0 = Vec::with_capacity(len);
         self.for_recent(len, |_, s| {
             level0.push(Envelope { min: s, max: s });
@@ -111,10 +100,6 @@ impl ChannelHistory {
         self.dirty = false;
     }
 
-    /// Summarize the most recent `window` samples as `cols` envelopes, oldest
-    /// first. Each column owns sample range `[c*window/cols, (c+1)*window/cols)`;
-    /// we read whichever mip level keeps that range a handful of entries, so the
-    /// result is identical to a full O(window) scan but costs ~O(cols).
     fn envelope_from_mips(&self, cols: usize, window: usize, out: &mut [Envelope]) {
         debug_assert_eq!(out.len(), cols);
         let total = self.mips.first().map_or(0, |l| l.len());
@@ -124,34 +109,25 @@ impl ChannelHistory {
             return;
         }
 
-        // Pick the coarsest level whose entries are no wider than one column, so
-        // each column still aggregates >= 1 entry — guaranteeing we never widen
-        // a column's true [lo,hi) sample span enough to miss or borrow a peak.
-        let spc = window / cols; // samples per column (floor)
+        let spc = window / cols;
         let level = if spc <= 1 {
             0
         } else {
-            // largest level with 2^level <= spc
             (usize::BITS - 1 - spc.leading_zeros()) as usize
         }
         .min(self.mips.len() - 1);
 
         let lvl = &self.mips[level];
-        let scale = 1usize << level; // samples per entry at this level
-        // Logical sample index of the window's first sample (oldest in view).
+        let scale = 1usize << level;
         let win_start = total - window;
 
         for (c, e_out) in out.iter_mut().enumerate() {
-            // Sample range this column owns, in logical (oldest-first) coords.
             let s_lo = win_start + (c * window) / cols;
             let s_hi = win_start + ((c + 1) * window) / cols;
             if s_hi <= s_lo {
-                // Zoomed past 1 sample/column: this column has no sample of its
-                // own. Leave it empty, matching the pre-mip behavior.
                 *e_out = Envelope::default();
                 continue;
             }
-            // Mip entries covering [s_lo, s_hi): floor(lo) .. ceil(hi).
             let e_lo = s_lo / scale;
             let e_hi = s_hi.div_ceil(scale).min(lvl.len());
             let mut acc = Envelope {
@@ -175,7 +151,6 @@ impl ChannelHistory {
     }
 }
 
-/// Drains a [`CaptureHandle`] into per-channel histories and renders envelopes.
 pub struct WaveScope {
     handle: CaptureHandle,
     channels: Vec<ChannelHistory>,
@@ -193,7 +168,6 @@ impl WaveScope {
         }
     }
 
-    /// True once capture has negotiated a format and samples are flowing.
     pub fn is_ready(&self) -> bool {
         self.handle.is_ready()
     }
@@ -206,7 +180,6 @@ impl WaveScope {
         self.n_channels
     }
 
-    /// Pull all currently-available audio into the per-channel histories.
     pub fn tick(&mut self) {
         let ch = self.handle.channels() as usize;
         if ch == 0 {
@@ -230,8 +203,6 @@ impl WaveScope {
             }
         }
 
-        // Refresh summary pyramids once per tick for channels that took new
-        // samples. Per-frame `envelope()` then just reads them (O(cols)).
         for hist in &mut self.channels {
             if hist.dirty {
                 hist.rebuild_mips();
@@ -239,8 +210,6 @@ impl WaveScope {
         }
     }
 
-    /// Copy the most recent `out.len()` samples of `channel` into `out`, oldest
-    /// first, zero-padding the lead. Returns how many real samples were written.
     pub fn samples_into(&self, channel: usize, out: &mut [f32]) -> usize {
         let Some(hist) = self.channels.get(channel) else {
             out.fill(0.0);
@@ -253,8 +222,6 @@ impl WaveScope {
         n
     }
 
-    /// Summarize the most recent audio on `channel` as `cols` min/max envelopes,
-    /// oldest first. `window` is how many recent samples to span (zoom).
     pub fn envelope(&self, channel: usize, cols: usize, window: usize) -> Vec<Envelope> {
         let Some(hist) = self.channels.get(channel) else {
             return Vec::new();

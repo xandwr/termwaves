@@ -1,9 +1,5 @@
-//! In-place radix-2 Cooley–Tukey FFT and the windowing it rides on.
-
 use std::f32::consts::PI;
 
-/// A reusable real-input FFT: owns its scratch buffers and a Hann window so
-/// callers can transform repeatedly without allocating per frame.
 pub struct Fft {
     window: Vec<f32>,
     re: Vec<f32>,
@@ -12,7 +8,6 @@ pub struct Fft {
 }
 
 impl Fft {
-    /// Build an FFT of size `n` (must be a power of two) with a Hann window.
     pub fn new(n: usize) -> Self {
         debug_assert!(n.is_power_of_two(), "FFT size must be a power of two");
         let window = (0..n)
@@ -26,13 +21,10 @@ impl Fft {
         }
     }
 
-    /// FFT size.
     pub fn len(&self) -> usize {
         self.re.len()
     }
 
-    /// Window `samples` (length must equal [`len`](Self::len)) and transform it
-    /// in place, returning the real and imaginary spectra.
     pub fn transform(&mut self, samples: &[f32]) -> (&[f32], &[f32]) {
         debug_assert_eq!(samples.len(), self.re.len());
         for (re, (sample, w)) in self.re.iter_mut().zip(samples.iter().zip(&self.window)) {
@@ -44,7 +36,6 @@ impl Fft {
     }
 }
 
-/// Precompute the bit-reversal permutation for a length-`n` (power-of-two) FFT.
 fn bit_reversal(n: usize) -> Vec<usize> {
     let bits = n.trailing_zeros();
     (0..n)
@@ -52,7 +43,6 @@ fn bit_reversal(n: usize) -> Vec<usize> {
         .collect()
 }
 
-/// In-place iterative radix-2 Cooley–Tukey FFT.
 fn fft_in_place(re: &mut [f32], im: &mut [f32], rev: &[usize]) {
     let n = re.len();
 
@@ -95,13 +85,10 @@ fn fft_in_place(re: &mut [f32], im: &mut [f32], rev: &[usize]) {
 mod tests {
     use super::*;
 
-    /// A DC (constant) input puts all energy in bin 0 and nowhere else.
     #[test]
     fn dc_input_lands_in_bin_zero() {
         let n = 64;
         let mut fft = Fft::new(n);
-        // Pre-window energy is constant; the Hann window shapes it but keeps it
-        // entirely real and concentrated at the low end.
         let (re, im) = fft.transform(&vec![1.0; n]);
         let power = |k: usize| re[k] * re[k] + im[k] * im[k];
         let bin0 = power(0);
@@ -109,7 +96,6 @@ mod tests {
         assert!(bin0 > mid * 1000.0, "bin0={bin0}, mid-band sum={mid}");
     }
 
-    /// A pure sinusoid at bin `k` concentrates its energy in bin `k`.
     #[test]
     fn pure_bin_concentrates() {
         let n = 256;
@@ -123,7 +109,6 @@ mod tests {
         let peak = (1..n / 2)
             .max_by(|&a, &b| power(a).total_cmp(&power(b)))
             .unwrap();
-        // Hann widens the peak by one bin either side; accept k ± 1.
         assert!(
             (peak as i32 - k as i32).abs() <= 1,
             "peak bin {peak}, expected ~{k}"

@@ -1,5 +1,3 @@
-//! PipeWire system-output capture.
-
 use std::convert::TryInto;
 use std::mem;
 use std::sync::Arc;
@@ -19,39 +17,30 @@ const RING_CAPACITY: usize = 96_000;
 type RingProducer = ringbuf::wrap::caching::Caching<Arc<HeapRb<f32>>, true, false>;
 type RingConsumer = ringbuf::wrap::caching::Caching<Arc<HeapRb<f32>>, false, true>;
 
-/// Negotiated stream format, shared from the capture thread to the consumer.
 #[derive(Default)]
 struct SharedFormat {
     channels: AtomicU32,
     rate: AtomicU32,
 }
 
-/// Handle the TUI uses to consume audio.
-///
-/// The capture thread is detached and runs until the process exits; dropping
-/// this handle stops draining the ring but does not tear the thread down.
 pub struct CaptureHandle {
     consumer: RingConsumer,
     format: Arc<SharedFormat>,
 }
 
 impl CaptureHandle {
-    /// Number of interleaved channels, or 0 before the format is negotiated.
     pub fn channels(&self) -> u32 {
         self.format.channels.load(Ordering::Relaxed)
     }
 
-    /// Sample rate in Hz, or 0 before the format is negotiated.
     pub fn sample_rate(&self) -> u32 {
         self.format.rate.load(Ordering::Relaxed)
     }
 
-    /// True once the stream has negotiated a format and is delivering audio.
     pub fn is_ready(&self) -> bool {
         self.channels() > 0
     }
 
-    /// Drain available interleaved samples into `out`, returning how many.
     pub fn read(&mut self, out: &mut [f32]) -> usize {
         self.consumer.pop_slice(out)
     }
@@ -64,7 +53,6 @@ struct CaptureState {
     scratch: Vec<f32>,
 }
 
-/// Start capturing system output on a dedicated PipeWire thread.
 pub fn start() -> CaptureHandle {
     let ring = Arc::new(HeapRb::<f32>::new(RING_CAPACITY));
     let (producer, consumer) = ring.split();

@@ -3,8 +3,6 @@ name = "termwaves"
 version.workspace = true
 edition.workspace = true
 
-# The library is the signal path only: PipeWire capture, history, FFT, spectrum.
-# No rendering stack — clients bring their own.
 [dependencies]
 pipewire.workspace = true
 ringbuf.workspace = true

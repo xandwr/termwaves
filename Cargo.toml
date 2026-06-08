@@ -1,13 +1,8 @@
-# Two pieces: the `termwaves` core library (audio capture + DSP) and the
-# `termwaves-client` terminal app you actually run. The client depends on the
-# lib by path; the lib depends on neither the client nor any UI stack.
 [workspace]
 resolver = "3"
 members = ["crates/termwaves", "client"]
-# Bare `cargo run` / `cargo build` from the root targets the client app.
 default-members = ["client"]
 
-# Versions shared by both crates, pinned once here.
 [workspace.dependencies]
 pipewire = "0.10.0"
 ringbuf = "0.5.0"
