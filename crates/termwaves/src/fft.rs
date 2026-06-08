@@ -25,6 +25,10 @@ impl Fft {
         self.re.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.re.is_empty()
+    }
+
     pub fn transform(&mut self, samples: &[f32]) -> (&[f32], &[f32]) {
         debug_assert_eq!(samples.len(), self.re.len());
         for (re, (sample, w)) in self.re.iter_mut().zip(samples.iter().zip(&self.window)) {
