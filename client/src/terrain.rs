@@ -1,11 +1,12 @@
 use ratatui::{
     prelude::*,
-    widgets::canvas::{Canvas, Line as CanvasLine},
+    style::Color,
+    widgets::canvas::{Canvas, Context, Line as CanvasLine},
 };
 
 use crossterm::event::KeyCode;
 
-use crate::color::surface_color;
+use crate::color::{ocean_color, surface_color};
 use crate::view::{Ctx, View, framed, placeholder_text};
 
 const DEFAULT_DEPTH: usize = 9;
@@ -35,6 +36,10 @@ const FIELD_STAMP: f32 = 0.6;
 /// treated as coplanar and greedily merged into one outlined plane.
 const MERGE_TOLERANCE: f32 = 0.07;
 
+/// A merged plane counts as "ocean" (flat sea) when its highest point sits
+/// within this fraction of `PEAK_HEIGHT` of the baseline. These get filled blue.
+const SEA_LEVEL: f32 = 0.04;
+
 /// A greedily-merged rectangle of faces spanning cells
 /// `[x0, x1] x [r0, r1]` (inclusive), all roughly coplanar.
 struct MeshRect {
@@ -42,6 +47,8 @@ struct MeshRect {
     x1: usize,
     r0: usize,
     r1: usize,
+    /// Highest surface_y among the rect's corners (for sea-level test).
+    hi: f32,
 }
 
 pub struct Terrain {
@@ -320,6 +327,7 @@ impl Terrain {
                     x1: x1 + 1,
                     r0: r,
                     r1: r1 + 1,
+                    hi,
                 });
             }
         }
@@ -366,16 +374,38 @@ impl Terrain {
             .x_bounds([0.0, sx])
             .y_bounds([0.0, sy])
             .paint(move |ctx| {
+                let sea = SEA_LEVEL * PEAK_HEIGHT;
                 // Painter's order: draw far (large r) rectangles first.
                 let mut order: Vec<&MeshRect> = rects.iter().collect();
                 order.sort_by_key(|rect| std::cmp::Reverse(rect.r1));
 
                 for rect in order {
+                    let is_ocean = rect.hi <= sea;
+                    // Fade deep (far) -> shallow (near) by depth.
+                    let ocean_t = rect.r0 as f32 / (self.depth - 1).max(1) as f32;
+
+                    // Flat planes resting at sea level are ocean: fill them blue.
+                    if is_ocean
+                        && let (Some(a), Some(b), Some(c), Some(d)) = (
+                            vertex(rect.x0, rect.r0),
+                            vertex(rect.x1, rect.r0),
+                            vertex(rect.x1, rect.r1),
+                            vertex(rect.x0, rect.r1),
+                        )
+                    {
+                        fill_quad(ctx, [a, b, c, d], ocean_color(ocean_t));
+                    }
+
                     // Outline that follows the terrain surface: walk each edge
                     // of the rectangle cell-by-cell so the border tracks the
-                    // real heightfield instead of a flat plane.
-                    let shade = self.edge_shade(rect.x0.min(self.width - 2), rect.r0, true);
-                    let color = surface_color(shade);
+                    // real heightfield instead of a flat plane. Ocean borders
+                    // take the water color so the sea reads as one flat sheet.
+                    let color = if is_ocean {
+                        ocean_color((ocean_t + 0.15).min(1.0))
+                    } else {
+                        let shade = self.edge_shade(rect.x0.min(self.width - 2), rect.r0, true);
+                        surface_color(shade)
+                    };
                     let mut seg = |ax: usize, ar: usize, bx: usize, br: usize| {
                         if let (Some((x1, y1)), Some((x2, y2))) = (vertex(ax, ar), vertex(bx, br)) {
                             ctx.draw(&CanvasLine {
@@ -543,5 +573,51 @@ impl View for Terrain {
         } else {
             placeholder_text(f, inner, "warming up…");
         }
+    }
+}
+
+/// Scanline-fill a convex quad (4 screen-space corners, in order) with `color`
+/// by drawing closely-spaced horizontal lines. Used to paint flat ocean planes.
+fn fill_quad(ctx: &mut Context, quad: [(f64, f64); 4], color: Color) {
+    let (mut y_min, mut y_max) = (quad[0].1, quad[0].1);
+    for &(_, y) in &quad[1..] {
+        y_min = y_min.min(y);
+        y_max = y_max.max(y);
+    }
+    if y_max - y_min <= f64::EPSILON {
+        return;
+    }
+
+    // One braille sub-row in canvas units; half-steps avoid seams.
+    const STEP: f64 = 0.5;
+    let mut y = y_min;
+    while y <= y_max {
+        let mut lo = f64::INFINITY;
+        let mut hi = f64::NEG_INFINITY;
+        for i in 0..4 {
+            let (ax, ay) = quad[i];
+            let (bx, by) = quad[(i + 1) % 4];
+            // Does edge a->b straddle this scanline?
+            if (ay <= y && by >= y) || (by <= y && ay >= y) {
+                let dy = by - ay;
+                let x = if dy.abs() < f64::EPSILON {
+                    ax.min(bx)
+                } else {
+                    ax + (bx - ax) * (y - ay) / dy
+                };
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+        }
+        if hi >= lo {
+            ctx.draw(&CanvasLine {
+                x1: lo,
+                y1: y,
+                x2: hi,
+                y2: y,
+                color,
+            });
+        }
+        y += STEP;
     }
 }
