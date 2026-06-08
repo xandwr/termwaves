@@ -628,13 +628,19 @@ impl View for Terrain {
     }
 
     /// Keys 1-9 set the landscape depth (number of rows) to twice that value,
-    /// so `5` gives a depth of 10, `9` gives 18, etc.
+    /// so `5` gives a depth of 10, `9` gives 18, etc. Delete removes every ball.
     fn handle_key(&mut self, code: KeyCode) -> bool {
-        if let KeyCode::Char(c @ '1'..='9') = code {
-            self.set_depth((c as usize - '0' as usize) * 2);
-            return true;
+        match code {
+            KeyCode::Char(c @ '1'..='9') => {
+                self.set_depth((c as usize - '0' as usize) * 2);
+                true
+            }
+            KeyCode::Delete => {
+                self.balls.clear();
+                true
+            }
+            _ => false,
         }
-        false
     }
 
     fn render(&self, f: &mut Frame, area: Rect, _ctx: &Ctx) {
