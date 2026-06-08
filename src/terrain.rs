@@ -8,13 +8,16 @@ use ratatui::{
 use crate::color::heat_color;
 use crate::view::{Ctx, View, framed, placeholder_text};
 
-const DEPTH: usize = 3;
-const PEAK_HEIGHT: f32 = 32.0;
-const SPIKE_GAMMA: f32 = 2.2;
+const DEPTH: usize = 4;
+const PEAK_HEIGHT: f32 = 14.0;
+const SPIKE_GAMMA: f32 = 2.4;
 const CAM_HEIGHT: f32 = 2.0;
-const CAM_SETBACK: f32 = 8.0;
-const CAM_PITCH: f32 = 0.5;
-const FOCAL: f32 = 1.0;
+const CAM_SETBACK: f32 = 6.0;
+const CAM_PITCH: f32 = 0.6;
+const FOCAL: f32 = 1.6;
+/// Vertical NDC offset that recenters the downward-pitched view so the ground
+/// plane lands inside the frame instead of clipping off the bottom.
+const HORIZON_LIFT: f32 = 0.6;
 
 /// A rolling 3D height-field built from successive spectrum rows.
 pub struct Terrain {
@@ -64,7 +67,9 @@ impl Terrain {
         let sy = (area.height as f64 * 4.0).max(1.0);
 
         const CELL_ASPECT: f64 = 2.0;
-        let aspect = (sx / sy) * CELL_ASPECT;
+        // Cancels the unequal sx/sy pixel scaling applied at the ndc->px step
+        // (and the 2:1 terminal-cell aspect) so a world-space square stays square.
+        let aspect = (sy / sx) * (CELL_ASPECT * CELL_ASPECT);
 
         let width = self.width;
         let project = |x: usize, r: usize| -> Option<(f64, f64)> {
@@ -84,7 +89,7 @@ impl Terrain {
             }
 
             let ndc_x = (FOCAL * ex / ez) as f64 * aspect;
-            let ndc_y = (FOCAL * ey / ez) as f64;
+            let ndc_y = (FOCAL * ey / ez + HORIZON_LIFT) as f64;
             let px = (ndc_x * 0.5 + 0.5) * sx;
             let py = (ndc_y * 0.5 + 0.5) * sy;
             Some((px, py))

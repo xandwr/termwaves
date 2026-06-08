@@ -23,11 +23,11 @@ use spectrum::Spectrum;
 use terrain::Terrain;
 use view::{Ctx, Placeholder, View};
 
-const SPEC_MIN_HZ: f32 = 30.0;
-const SPEC_MAX_HZ: f32 = 16_000.0;
-const N_BANDS: usize = 48;
+const SPEC_MIN_HZ: f32 = 24.0;
+const SPEC_MAX_HZ: f32 = 20_000.0;
+const N_BANDS: usize = 32;
 
-const WINDOW_MIN: usize = 480;
+const WINDOW_MIN: usize = 200;
 const WINDOW_MAX: usize = 24_000;
 const WINDOW_DEFAULT: usize = 4_800;
 

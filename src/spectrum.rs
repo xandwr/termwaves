@@ -4,7 +4,7 @@ use crate::fft::Fft;
 use crate::scope::WaveScope;
 
 const FFT_SIZE: usize = 4096;
-const DB_FLOOR: f32 = -90.0;
+const DB_FLOOR: f32 = -64.0;
 const LOUDNESS_EMA_ALPHA: f32 = 0.001;
 const ADAPTIVE_GAIN_CLAMP_DB: f32 = 12.0;
 
