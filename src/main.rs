@@ -124,6 +124,11 @@ impl App {
             self.channel = (self.channel + 1) % n;
         }
     }
+
+    /// Forward a key the global loop didn't claim to the active view.
+    fn forward_key(&mut self, code: KeyCode) {
+        self.views[self.active].handle_key(code);
+    }
 }
 
 fn main() -> io::Result<()> {
@@ -152,7 +157,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>, mut app: App) -> io::R
                 KeyCode::Char('-') | KeyCode::Char('_') => app.zoom_out(),
                 KeyCode::Tab | KeyCode::Char('c') => app.next_channel(),
                 KeyCode::F(n) => app.select_fkey(n),
-                _ => {}
+                code => app.forward_key(code),
             }
         }
     }
@@ -169,7 +174,7 @@ fn ui(f: &mut Frame, app: &App) {
 fn render_status(f: &mut Frame, area: Rect, app: &App) {
     let status = if app.wave.is_ready() {
         format!(
-            " termwaves: {} · ch {}/{} @ {} Hz · window {} samp   [F1-F8 view · +/- zoom · Tab channel · q quit]",
+            " termwaves: {} · ch {}/{} @ {} Hz · window {} samp   [F1-F8 view · 1-9 depth · +/- zoom · Tab channel · q quit]",
             app.views[app.active].name(),
             app.channel,
             app.wave.channel_count(),

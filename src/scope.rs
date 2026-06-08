@@ -23,6 +23,11 @@ struct ChannelHistory {
     buf: Vec<f32>,
     head: usize,
     filled: bool,
+    /// Min/max summary pyramid over the *logical* (oldest-first) history.
+    /// `mips[0]` is one envelope per sample; each higher level halves the
+    /// count by merging adjacent pairs. Rebuilt lazily when `dirty`.
+    mips: Vec<Vec<Envelope>>,
+    dirty: bool,
 }
 
 impl ChannelHistory {
@@ -31,6 +36,8 @@ impl ChannelHistory {
             buf: vec![0.0; HISTORY_PER_CHANNEL],
             head: 0,
             filled: false,
+            mips: Vec::new(),
+            dirty: true,
         }
     }
 
@@ -41,6 +48,7 @@ impl ChannelHistory {
             self.head = 0;
             self.filled = true;
         }
+        self.dirty = true;
     }
 
     fn len(&self) -> usize {
@@ -63,6 +71,107 @@ impl ChannelHistory {
                 logical
             };
             f(i, self.buf[phys]);
+        }
+    }
+
+    /// Rebuild the min/max summary pyramid from the current ring contents.
+    /// O(len) total across all levels (geometric series). Called at most once
+    /// per `tick`, regardless of how many frames are rendered in between.
+    fn rebuild_mips(&mut self) {
+        let len = self.len();
+        // Level 0: one envelope per logical sample, oldest first.
+        let mut level0 = Vec::with_capacity(len);
+        self.for_recent(len, |_, s| {
+            level0.push(Envelope { min: s, max: s });
+        });
+
+        let mut mips = Vec::new();
+        mips.push(level0);
+        while mips.last().map_or(0, |l| l.len()) > 1 {
+            let prev = mips.last().unwrap();
+            let mut next = Vec::with_capacity(prev.len().div_ceil(2));
+            let mut i = 0;
+            while i < prev.len() {
+                let a = prev[i];
+                let merged = if i + 1 < prev.len() {
+                    let b = prev[i + 1];
+                    Envelope {
+                        min: a.min.min(b.min),
+                        max: a.max.max(b.max),
+                    }
+                } else {
+                    a
+                };
+                next.push(merged);
+                i += 2;
+            }
+            mips.push(next);
+        }
+
+        self.mips = mips;
+        self.dirty = false;
+    }
+
+    /// Summarize the most recent `window` samples as `cols` envelopes, oldest
+    /// first. Each column owns sample range `[c*window/cols, (c+1)*window/cols)`;
+    /// we read whichever mip level keeps that range a handful of entries, so the
+    /// result is identical to a full O(window) scan but costs ~O(cols).
+    fn envelope_from_mips(&self, cols: usize, window: usize, out: &mut [Envelope]) {
+        debug_assert_eq!(out.len(), cols);
+        let total = self.mips.first().map_or(0, |l| l.len());
+        let window = window.min(total);
+        if cols == 0 || window == 0 {
+            out.fill(Envelope::default());
+            return;
+        }
+
+        // Pick the coarsest level whose entries are no wider than one column, so
+        // each column still aggregates >= 1 entry — guaranteeing we never widen
+        // a column's true [lo,hi) sample span enough to miss or borrow a peak.
+        let spc = window / cols; // samples per column (floor)
+        let level = if spc <= 1 {
+            0
+        } else {
+            // largest level with 2^level <= spc
+            (usize::BITS - 1 - spc.leading_zeros()) as usize
+        }
+        .min(self.mips.len() - 1);
+
+        let lvl = &self.mips[level];
+        let scale = 1usize << level; // samples per entry at this level
+        // Logical sample index of the window's first sample (oldest in view).
+        let win_start = total - window;
+
+        for (c, e_out) in out.iter_mut().enumerate() {
+            // Sample range this column owns, in logical (oldest-first) coords.
+            let s_lo = win_start + (c * window) / cols;
+            let s_hi = win_start + ((c + 1) * window) / cols;
+            if s_hi <= s_lo {
+                // Zoomed past 1 sample/column: this column has no sample of its
+                // own. Leave it empty, matching the pre-mip behavior.
+                *e_out = Envelope::default();
+                continue;
+            }
+            // Mip entries covering [s_lo, s_hi): floor(lo) .. ceil(hi).
+            let e_lo = s_lo / scale;
+            let e_hi = s_hi.div_ceil(scale).min(lvl.len());
+            let mut acc = Envelope {
+                min: f32::INFINITY,
+                max: f32::NEG_INFINITY,
+            };
+            for entry in &lvl[e_lo..e_hi] {
+                if entry.min < acc.min {
+                    acc.min = entry.min;
+                }
+                if entry.max > acc.max {
+                    acc.max = entry.max;
+                }
+            }
+            *e_out = if acc.min.is_finite() {
+                acc
+            } else {
+                Envelope::default()
+            };
         }
     }
 }
@@ -121,6 +230,14 @@ impl WaveScope {
                 break;
             }
         }
+
+        // Refresh summary pyramids once per tick for channels that took new
+        // samples. Per-frame `envelope()` then just reads them (O(cols)).
+        for hist in &mut self.channels {
+            if hist.dirty {
+                hist.rebuild_mips();
+            }
+        }
     }
 
     /// Copy the most recent `out.len()` samples of `channel` into `out`, oldest
@@ -151,29 +268,8 @@ impl WaveScope {
             return Vec::new();
         }
 
-        let mut out = vec![
-            Envelope {
-                min: f32::INFINITY,
-                max: f32::NEG_INFINITY,
-            };
-            cols
-        ];
-        hist.for_recent(window, |i, sample| {
-            let col = (i * cols) / window;
-            let col = col.min(cols - 1);
-            let e = &mut out[col];
-            if sample < e.min {
-                e.min = sample;
-            }
-            if sample > e.max {
-                e.max = sample;
-            }
-        });
-        for e in &mut out {
-            if !e.min.is_finite() {
-                *e = Envelope::default();
-            }
-        }
+        let mut out = vec![Envelope::default(); cols];
+        hist.envelope_from_mips(cols, window, &mut out);
         out
     }
 }

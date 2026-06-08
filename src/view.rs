@@ -4,6 +4,7 @@
 //! [`Spectrum`]). Adding a view means writing one type and pushing it into the
 //! list in `App::new` — no enum arms or `match` sites to update.
 
+use crossterm::event::KeyCode;
 use ratatui::{
     Frame,
     layout::Rect,
@@ -32,6 +33,12 @@ pub trait View {
     /// Advance any view-owned state from the latest audio. Default: no-op for
     /// stateless views that read everything fresh at render time.
     fn tick(&mut self, _ctx: &Ctx) {}
+
+    /// Handle a key press the global event loop didn't claim. Return `true` if
+    /// the view consumed it. Default: ignore everything.
+    fn handle_key(&mut self, _code: KeyCode) -> bool {
+        false
+    }
 
     /// Draw the view body into `area`.
     fn render(&self, f: &mut Frame, area: Rect, ctx: &Ctx);

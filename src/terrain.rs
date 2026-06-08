@@ -5,24 +5,33 @@ use ratatui::{
     widgets::canvas::{Canvas, Line as CanvasLine},
 };
 
+use crossterm::event::KeyCode;
+
 use crate::color::heat_color;
 use crate::view::{Ctx, View, framed, placeholder_text};
 
-const DEPTH: usize = 4;
-const PEAK_HEIGHT: f32 = 14.0;
+/// Default number of spectrum rows held in the rolling landscape. Keys 1-9
+/// rebind this live; see [`Terrain::handle_key`].
+const DEFAULT_DEPTH: usize = 9;
+const PEAK_HEIGHT: f32 = 6.6;
 const SPIKE_GAMMA: f32 = 2.4;
-const CAM_HEIGHT: f32 = 2.0;
-const CAM_SETBACK: f32 = 6.0;
+const CAM_HEIGHT: f32 = 2.5;
+const CAM_SETBACK: f32 = 8.0;
 const CAM_PITCH: f32 = 0.6;
-const FOCAL: f32 = 1.6;
+const FOCAL: f32 = 1.2;
+/// Half the terrain's world-space span. The band index maps to
+/// `[-WORLD_HALF_WIDTH, +WORLD_HALF_WIDTH]`, so raising this widens the
+/// landscape physically without moving the camera.
+const WORLD_HALF_WIDTH: f32 = 1.5;
 /// Vertical NDC offset that recenters the downward-pitched view so the ground
 /// plane lands inside the frame instead of clipping off the bottom.
-const HORIZON_LIFT: f32 = 0.6;
+const HORIZON_LIFT: f32 = 1.2;
 
 /// A rolling 3D height-field built from successive spectrum rows.
 pub struct Terrain {
     rows: Vec<f32>,
     width: usize,
+    depth: usize,
     head: usize,
     primed: bool,
 }
@@ -31,11 +40,24 @@ impl Terrain {
     /// Build an empty terrain holding rows of `width` bands.
     pub fn new(width: usize) -> Self {
         Self {
-            rows: vec![0.0; DEPTH * width.max(1)],
+            rows: vec![0.0; DEFAULT_DEPTH * width.max(1)],
             width: width.max(1),
+            depth: DEFAULT_DEPTH,
             head: 0,
             primed: false,
         }
+    }
+
+    /// Resize the landscape to `depth` rows, clearing it. The next pushes
+    /// refill the (smaller or larger) ring from scratch.
+    fn set_depth(&mut self, depth: usize) {
+        if depth == self.depth {
+            return;
+        }
+        self.depth = depth;
+        self.rows = vec![0.0; depth * self.width];
+        self.head = 0;
+        self.primed = false;
     }
 
     /// Push the latest spectrum row, scrolling the landscape toward the camera.
@@ -48,12 +70,12 @@ impl Terrain {
         for dst in slot.iter_mut().skip(magnitudes.len()) {
             *dst = 0.0;
         }
-        self.head = (self.head + 1) % DEPTH;
+        self.head = (self.head + 1) % self.depth;
         self.primed = true;
     }
 
     fn height(&self, r: usize, x: usize) -> f32 {
-        let ring = (self.head + DEPTH - 1 - r) % DEPTH;
+        let ring = (self.head + self.depth - 1 - r) % self.depth;
         self.rows[ring * self.width + x]
     }
 
@@ -72,8 +94,9 @@ impl Terrain {
         let aspect = (sy / sx) * (CELL_ASPECT * CELL_ASPECT);
 
         let width = self.width;
+        let depth = self.depth;
         let project = |x: usize, r: usize| -> Option<(f64, f64)> {
-            let wx = (x as f32 / (width - 1) as f32 - 0.5) * 2.0;
+            let wx = (x as f32 / (width - 1) as f32 - 0.5) * 2.0 * WORLD_HALF_WIDTH;
             let wy = self.height(r, x).powf(SPIKE_GAMMA) * PEAK_HEIGHT;
             let wz = r as f32;
 
@@ -99,7 +122,7 @@ impl Terrain {
             .x_bounds([0.0, sx])
             .y_bounds([0.0, sy])
             .paint(move |ctx| {
-                for r in (0..DEPTH).rev() {
+                for r in (0..depth).rev() {
                     for x in 0..width {
                         let Some((px, py)) = project(x, r) else {
                             continue;
@@ -145,6 +168,15 @@ impl View for Terrain {
             let row: Vec<f32> = spectrum.bands().iter().map(|b| b.magnitude).collect();
             self.push(&row);
         }
+    }
+
+    /// Keys 1-9 set the landscape depth (number of rows) to that value.
+    fn handle_key(&mut self, code: KeyCode) -> bool {
+        if let KeyCode::Char(c @ '1'..='9') = code {
+            self.set_depth(c as usize - '0' as usize);
+            return true;
+        }
+        false
     }
 
     fn render(&self, f: &mut Frame, area: Rect, _ctx: &Ctx) {
