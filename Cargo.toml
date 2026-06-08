@@ -12,3 +12,10 @@ crossterm = "0.28"
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+authors = ["Xander Pickering <ajamespickering@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/xandwr/termwaves"
+homepage = "https://github.com/xandwr/termwaves"
+readme = "README.md"
+keywords = ["audio", "pipewire", "spectrum", "oscilloscope", "tui"]
+categories = ["multimedia::audio", "visualization", "command-line-utilities"]

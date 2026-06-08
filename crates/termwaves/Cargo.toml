@@ -1,7 +1,15 @@
 [package]
 name = "termwaves"
+description = "Real-time audio capture and visualization (FFT, oscilloscope, spectrum) driven by PipeWire"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["multimedia::audio", "visualization"]
 
 [dependencies]
 pipewire.workspace = true

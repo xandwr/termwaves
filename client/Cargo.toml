@@ -1,13 +1,21 @@
 [package]
 name = "termwaves-client"
+description = "Terminal UI for real-time audio visualization, powered by termwaves and PipeWire"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories = ["command-line-utilities", "multimedia::audio", "visualization"]
 
 [[bin]]
 name = "termwaves"
 path = "src/main.rs"
 
 [dependencies]
-termwaves = { path = "../crates/termwaves" }
+termwaves = { path = "../crates/termwaves", version = "0.1.0" }
 ratatui.workspace = true
 crossterm.workspace = true
