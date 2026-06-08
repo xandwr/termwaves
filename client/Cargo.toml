@@ -16,6 +16,5 @@ name = "termwaves"
 path = "src/main.rs"
 
 [dependencies]
-termwaves = { path = "../crates/termwaves", version = "0.1.0" }
 ratatui.workspace = true
 crossterm.workspace = true
