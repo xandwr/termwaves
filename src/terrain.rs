@@ -12,7 +12,7 @@ use crate::view::{Ctx, View, framed, placeholder_text};
 
 /// Default number of spectrum rows held in the rolling landscape. Keys 1-9
 /// rebind this live; see [`Terrain::handle_key`].
-const DEFAULT_DEPTH: usize = 9;
+const DEFAULT_DEPTH: usize = 1;
 const PEAK_HEIGHT: f32 = 6.6;
 const SPIKE_GAMMA: f32 = 2.4;
 const CAM_HEIGHT: f32 = 2.5;
