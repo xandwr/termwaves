@@ -2,7 +2,7 @@
 
 use ratatui::{
     prelude::*,
-    widgets::canvas::{Canvas, Circle, Line as CanvasLine},
+    widgets::canvas::{Canvas, Line as CanvasLine},
 };
 
 use crossterm::event::KeyCode;
@@ -52,32 +52,6 @@ const AMBIENT: f32 = 0.2;
 /// rows are pinned to y=0 and a smooth envelope tugs the interior rows down so
 /// only the middle of the landscape rises, like land surrounded by water.
 const ISLAND_MIN_DEPTH: usize = 6;
-/// How many balls roll around on the landscape.
-const BALL_COUNT: usize = 5;
-/// How hard the surface slope pushes a ball each tick (grid units / tick²).
-const BALL_GRAVITY: f32 = 0.12;
-/// Velocity retained each tick (the rest is lost to friction), so balls settle
-/// in valleys instead of oscillating forever.
-const BALL_FRICTION: f32 = 0.82;
-/// Speed clamp so a steep plane can't fling a ball across the whole grid in one
-/// tick (grid units / tick).
-const BALL_MAX_SPEED: f32 = 0.6;
-/// Radius of the drawn ball marker, in screen pixels.
-const BALL_RADIUS: f64 = 2.5;
-/// Ticks a ball spends airborne in its lift-and-spiral animation before it
-/// drops back onto the surface near the center.
-const BALL_FLOAT_TICKS: u32 = 90;
-/// Peak extra world-height a floating ball reaches at the top of its arc, on top
-/// of the surface height. Sets how high the "wind" lifts it.
-const BALL_FLOAT_LIFT: f32 = 3.0;
-/// Number of full turns a ball spins through during its float, as the spiral
-/// winds inward toward the center.
-const BALL_FLOAT_TURNS: f32 = 2.5;
-/// Per-tick chance (out of `u32::MAX`) that a silent, rolling ball starts saying
-/// something. ~0.4% gives an occasional pipe-up without constant chatter.
-const BALL_SPEAK_CHANCE: u32 = (u32::MAX as f64 * 0.004) as u32;
-/// Ticks a speech bubble stays up once a ball starts talking.
-const BALL_SPEAK_TICKS: u32 = 70;
 
 /// Starting per-tick rotation of the sample-write direction in rotary mode
 /// (radians ≈ 1.7°/tick).
@@ -94,55 +68,6 @@ const FIELD_DECAY: f32 = 0.94;
 /// the current write direction. Higher = brighter, more present wavefront.
 const FIELD_STAMP: f32 = 0.6;
 
-/// The things the little people say, picked at random.
-const PHRASES: &[&str] = &[
-    "wheee!",
-    "i'm flying!",
-    "where am i?",
-    "nice hill",
-    "wooo",
-    "help",
-    "again!",
-    "so windy",
-    "hi mom",
-    "is this the cloud?",
-    "5 stars",
-    "whoa",
-    "not again",
-    "tell my wife i love her",
-    "yeet",
-    "weather's nice up here",
-];
-
-/// What a ball is doing this tick. Balls roll on the surface until they reach an
-/// edge, then float up in an inward spiral before dropping back near the center.
-#[derive(Clone, Copy)]
-enum BallState {
-    /// Marble rolling on the height-field, pushed downhill by the planes.
-    Rolling { vx: f32, vr: f32 },
-    /// Lifted by the "wind": spiraling up and inward toward the center. `phase`
-    /// runs `0.0..1.0` over `BALL_FLOAT_TICKS`; `from_*` is the lift-off point.
-    Floating {
-        phase: f32,
-        from_x: f32,
-        from_r: f32,
-    },
-}
-
-/// A ball living on the terrain. Position is in continuous grid coordinates
-/// (`gx` across bands, `gr` receding), so it can sit between grid vertices; the
-/// surface height is sampled there each tick.
-#[derive(Clone, Copy)]
-struct Ball {
-    gx: f32,
-    gr: f32,
-    /// Extra world-height above the surface, nonzero only while floating.
-    lift: f32,
-    state: BallState,
-    /// Current speech: `(phrase index, ticks remaining)`, or `None` if quiet.
-    speech: Option<(usize, u32)>,
-}
-
 /// A rolling 3D height-field built from successive spectrum rows.
 pub struct Terrain {
     rows: Vec<f32>,
@@ -156,11 +81,6 @@ pub struct Terrain {
     /// Smoothed peak height across the ring, used to normalize quiet passages up
     /// to full frame height.
     peak: f32,
-    /// Marbles rolling on the surface, pushed downhill by the planes.
-    balls: Vec<Ball>,
-    /// Xorshift state driving the random speech timing. Seeded to a fixed
-    /// nonzero constant; it just needs to look unpredictable, not be secure.
-    rng: u32,
     /// When true, the grid and camera stay fixed and incoming audio is stamped
     /// onto a persistent 2D field along a *rotating direction*, so the wavefront
     /// sweeps across the static plane instead of the geometry tumbling.
@@ -191,46 +111,12 @@ impl Terrain {
             primed: false,
             centroid: 0.5,
             peak: 1.0,
-            balls: Self::spawn_balls(width, DEFAULT_DEPTH),
-            rng: 0x9E3779B9,
             rotary: false,
             yaw: 0.0,
             yaw_speed: YAW_SPEED_DEFAULT,
             field: vec![0.0; DEFAULT_DEPTH * width],
             field_peak: 1.0,
         }
-    }
-
-    /// Advance the xorshift PRNG and return the next pseudo-random `u32`.
-    fn next_rand(&mut self) -> u32 {
-        let mut x = self.rng;
-        x ^= x << 13;
-        x ^= x >> 17;
-        x ^= x << 5;
-        self.rng = x;
-        x
-    }
-
-    /// Scatter `BALL_COUNT` balls across the interior of a `width`×`depth` grid,
-    /// spread evenly along the depth axis and staggered across the bands so they
-    /// don't start in a single line. Deterministic (no RNG) so resizes are stable.
-    fn spawn_balls(width: usize, depth: usize) -> Vec<Ball> {
-        let max_x = (width - 1) as f32;
-        let max_r = (depth - 1) as f32;
-        (0..BALL_COUNT)
-            .map(|i| {
-                let t = (i as f32 + 1.0) / (BALL_COUNT as f32 + 1.0);
-                // Stagger across the bands using a coprime-ish stride for spread.
-                let xf = ((i as f32 * 0.37 + 0.2) % 1.0).clamp(0.05, 0.95);
-                Ball {
-                    gx: xf * max_x,
-                    gr: t * max_r,
-                    lift: 0.0,
-                    state: BallState::Rolling { vx: 0.0, vr: 0.0 },
-                    speech: None,
-                }
-            })
-            .collect()
     }
 
     /// Resize the landscape to `depth` rows, clearing it. The next pushes
@@ -247,7 +133,6 @@ impl Terrain {
         self.primed = false;
         self.centroid = 0.5;
         self.peak = 1.0;
-        self.balls = Self::spawn_balls(self.width, depth);
     }
 
     /// Push the latest spectrum row, scrolling the landscape toward the camera.
@@ -390,27 +275,6 @@ impl Terrain {
         self.height(r, x).powf(SPIKE_GAMMA) * PEAK_HEIGHT * self.island_factor(r)
     }
 
-    /// Surface height at *continuous* grid coordinates `(gx, gr)`, bilinearly
-    /// interpolated between the four surrounding vertices. Coordinates are
-    /// clamped to the grid so balls near the edge still sample a valid cell.
-    fn surface_y_at(&self, gx: f32, gr: f32) -> f32 {
-        let gx = gx.clamp(0.0, (self.width - 1) as f32);
-        let gr = gr.clamp(0.0, (self.depth - 1) as f32);
-        let x0 = gx.floor() as usize;
-        let r0 = gr.floor() as usize;
-        let x1 = (x0 + 1).min(self.width - 1);
-        let r1 = (r0 + 1).min(self.depth - 1);
-        let fx = gx - x0 as f32;
-        let fr = gr - r0 as f32;
-        let h00 = self.surface_y(x0, r0);
-        let h10 = self.surface_y(x1, r0);
-        let h01 = self.surface_y(x0, r1);
-        let h11 = self.surface_y(x1, r1);
-        let top = h00 + (h10 - h00) * fx;
-        let bot = h01 + (h11 - h01) * fx;
-        top + (bot - top) * fr
-    }
-
     /// World-space position of grid vertex `(x, r)`: `x` across the bands, the
     /// rendered height up, and `r` receding from the camera. The projection in
     /// `render_wireframe` consumes these, and face normals are built from them.
@@ -419,121 +283,6 @@ impl Terrain {
         let wy = self.surface_y(x, r);
         let wz = r as f32;
         (wx, wy, wz)
-    }
-
-    /// Advance every ball one tick. Rolling balls are pushed downhill by the
-    /// surface slope (the planes do the pushing); a ball that rolls into an edge
-    /// is caught by the "wind" and switches to a floating spiral that lifts it up
-    /// and inward, dropping it back onto the surface near the center.
-    fn step_balls(&mut self) {
-        if !self.primed || self.width < 2 || self.depth < 2 {
-            return;
-        }
-        // Move the balls out so the gradient sampling can borrow `self` immutably.
-        let mut balls = std::mem::take(&mut self.balls);
-        for ball in &mut balls {
-            match ball.state {
-                BallState::Rolling { vx, vr } => self.step_rolling(ball, vx, vr),
-                BallState::Floating {
-                    phase,
-                    from_x,
-                    from_r,
-                } => self.step_floating(ball, phase, from_x, from_r),
-            }
-            // Tick down any active speech; otherwise occasionally pipe up.
-            match ball.speech {
-                Some((_, 1)) | None => {
-                    ball.speech = if self.next_rand() < BALL_SPEAK_CHANCE {
-                        let idx = self.next_rand() as usize % PHRASES.len();
-                        Some((idx, BALL_SPEAK_TICKS))
-                    } else {
-                        None
-                    };
-                }
-                Some((idx, ticks)) => ball.speech = Some((idx, ticks - 1)),
-            }
-        }
-        self.balls = balls;
-    }
-
-    /// One tick of a rolling ball: accelerate downhill along the surface gradient,
-    /// apply friction, clamp speed, and advance. Reaching an edge lifts it into
-    /// the floating state instead of wrapping.
-    fn step_rolling(&self, ball: &mut Ball, mut vx: f32, mut vr: f32) {
-        let max_x = (self.width - 1) as f32;
-        let max_r = (self.depth - 1) as f32;
-        // Finite-difference step for the gradient, small relative to a cell.
-        const EPS: f32 = 0.25;
-        // Downhill direction = negative gradient of the surface height.
-        let dy_dx =
-            self.surface_y_at(ball.gx + EPS, ball.gr) - self.surface_y_at(ball.gx - EPS, ball.gr);
-        let dy_dr =
-            self.surface_y_at(ball.gx, ball.gr + EPS) - self.surface_y_at(ball.gx, ball.gr - EPS);
-        vx += -dy_dx * BALL_GRAVITY;
-        vr += -dy_dr * BALL_GRAVITY;
-        vx *= BALL_FRICTION;
-        vr *= BALL_FRICTION;
-        let speed = (vx * vx + vr * vr).sqrt();
-        if speed > BALL_MAX_SPEED {
-            let s = BALL_MAX_SPEED / speed;
-            vx *= s;
-            vr *= s;
-        }
-        ball.gx += vx;
-        ball.gr += vr;
-
-        // Did it reach an edge? If so, the wind lifts it into a spiral.
-        if ball.gx <= 0.0 || ball.gx >= max_x || ball.gr <= 0.0 || ball.gr >= max_r {
-            ball.gx = ball.gx.clamp(0.0, max_x);
-            ball.gr = ball.gr.clamp(0.0, max_r);
-            ball.state = BallState::Floating {
-                phase: 0.0,
-                from_x: ball.gx,
-                from_r: ball.gr,
-            };
-        } else {
-            ball.state = BallState::Rolling { vx, vr };
-        }
-    }
-
-    /// One tick of a floating ball: advance the spiral. The base position lerps
-    /// from the lift-off point toward the center while a shrinking rotating offset
-    /// winds it inward, and `lift` traces a rise-and-fall arc. When the phase
-    /// completes the ball lands at the center and resumes rolling.
-    fn step_floating(&self, ball: &mut Ball, phase: f32, from_x: f32, from_r: f32) {
-        let max_x = (self.width - 1) as f32;
-        let max_r = (self.depth - 1) as f32;
-        let (cx, cr) = (max_x * 0.5, max_r * 0.5);
-
-        let phase = phase + 1.0 / BALL_FLOAT_TICKS as f32;
-        if phase >= 1.0 {
-            // Land at the center and roll again.
-            ball.gx = cx;
-            ball.gr = cr;
-            ball.lift = 0.0;
-            ball.state = BallState::Rolling { vx: 0.0, vr: 0.0 };
-            return;
-        }
-
-        // Base path: straight lerp from lift-off point to center.
-        let base_x = from_x + (cx - from_x) * phase;
-        let base_r = from_r + (cr - from_r) * phase;
-
-        // Spiral offset: rotate around the base path, radius shrinking to 0 so the
-        // ball corkscrews inward as it climbs.
-        let angle = phase * BALL_FLOAT_TURNS * std::f32::consts::TAU;
-        let start_radius = ((from_x - cx).powi(2) + (from_r - cr).powi(2)).sqrt();
-        let radius = start_radius * (1.0 - phase);
-        ball.gx = (base_x + angle.cos() * radius).clamp(0.0, max_x);
-        ball.gr = (base_r + angle.sin() * radius).clamp(0.0, max_r);
-
-        // Height arc: rise then fall, peaking mid-float.
-        ball.lift = (phase * std::f32::consts::PI).sin() * BALL_FLOAT_LIFT;
-        ball.state = BallState::Floating {
-            phase,
-            from_x,
-            from_r,
-        };
     }
 
     /// Lambert brightness of the quad face whose near-left corner is `(x, r)`.
@@ -631,21 +380,6 @@ impl Terrain {
             project(wx, wy, wz)
         };
 
-        // Project each ball's surface position up front; the canvas closure only
-        // needs the resulting screen point and its current line (if any), not a
-        // borrow of `self`.
-        let ball_pts: Vec<(f64, f64, Option<&'static str>)> = self
-            .balls
-            .iter()
-            .filter_map(|b| {
-                let wx = (b.gx / (self.width - 1) as f32 - 0.5) * 2.0 * WORLD_HALF_WIDTH;
-                let wy = self.surface_y_at(b.gx, b.gr) + b.lift;
-                let (px, py) = project(wx, wy, b.gr)?;
-                let phrase = b.speech.map(|(idx, _)| PHRASES[idx]);
-                Some((px, py, phrase))
-            })
-            .collect();
-
         let canvas = Canvas::default()
             .x_bounds([0.0, sx])
             .y_bounds([0.0, sy])
@@ -680,25 +414,6 @@ impl Terrain {
                         }
                     }
                 }
-                // Draw the balls last so they sit on top of the wireframe.
-                ctx.layer();
-                for &(px, py, phrase) in &ball_pts {
-                    ctx.draw(&Circle {
-                        x: px,
-                        y: py,
-                        radius: BALL_RADIUS,
-                        color: Color::White,
-                    });
-                    if let Some(text) = phrase {
-                        // Float the line just above the dot. Labels always render
-                        // on top of the canvas regardless of layer.
-                        ctx.print(
-                            px,
-                            py + BALL_RADIUS * 2.0,
-                            Line::from(text).style(Style::default().fg(Color::Yellow)),
-                        );
-                    }
-                }
             });
         f.render_widget(canvas, area);
     }
@@ -724,21 +439,16 @@ impl View for Terrain {
             if self.rotary {
                 self.stamp_field(&row);
             }
-            self.step_balls();
         }
     }
 
     /// Keys 1-9 set the landscape depth (number of rows) to twice that value,
-    /// so `5` gives a depth of 10, `9` gives 18, etc. Delete removes every ball.
+    /// so `5` gives a depth of 10, `9` gives 18, etc.
     /// `r` toggles rotary mode; `[` / `]` slow down / speed up its spin.
     fn handle_key(&mut self, code: KeyCode) -> bool {
         match code {
             KeyCode::Char(c @ '1'..='9') => {
                 self.set_depth((c as usize - '0' as usize) * 2);
-                true
-            }
-            KeyCode::Delete => {
-                self.balls.clear();
                 true
             }
             KeyCode::Char('r') => {

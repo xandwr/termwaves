@@ -267,7 +267,6 @@ fn render_help(f: &mut Frame, area: Rect) {
         Line::from(""),
         section("3D terrain (F1)"),
         key("1-9", "terrain depth"),
-        key("Del", "remove all people"),
         key("r", "toggle rotary mode"),
         key("[ / ]", "rotary speed -/+"),
     ];
