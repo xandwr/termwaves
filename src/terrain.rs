@@ -5,7 +5,8 @@ use ratatui::{
     widgets::canvas::{Canvas, Line as CanvasLine},
 };
 
-use crate::heat_color;
+use crate::color::heat_color;
+use crate::view::{Ctx, View, framed, placeholder_text};
 
 const DEPTH: usize = 3;
 const PEAK_HEIGHT: f32 = 32.0;
@@ -35,7 +36,7 @@ impl Terrain {
     }
 
     /// Push the latest spectrum row, scrolling the landscape toward the camera.
-    pub fn push(&mut self, magnitudes: &[f32]) {
+    fn push(&mut self, magnitudes: &[f32]) {
         let base = self.head * self.width;
         let slot = &mut self.rows[base..base + self.width];
         for (dst, src) in slot.iter_mut().zip(magnitudes.iter()) {
@@ -54,7 +55,7 @@ impl Terrain {
     }
 
     /// Render the terrain wireframe into `area`.
-    pub fn render(&self, f: &mut Frame, area: Rect) {
+    fn render_wireframe(&self, f: &mut Frame, area: Rect) {
         if !self.primed || self.width < 2 {
             return;
         }
@@ -126,5 +127,27 @@ impl Terrain {
                 }
             });
         f.render_widget(canvas, area);
+    }
+}
+
+impl View for Terrain {
+    fn name(&self) -> &str {
+        "3D terrain"
+    }
+
+    fn tick(&mut self, ctx: &Ctx) {
+        if let Some(spectrum) = ctx.spectrum {
+            let row: Vec<f32> = spectrum.bands().iter().map(|b| b.magnitude).collect();
+            self.push(&row);
+        }
+    }
+
+    fn render(&self, f: &mut Frame, area: Rect, _ctx: &Ctx) {
+        let inner = framed(f, area, "3D terrain");
+        if self.primed {
+            self.render_wireframe(f, inner);
+        } else {
+            placeholder_text(f, inner, "warming up…");
+        }
     }
 }

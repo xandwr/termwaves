@@ -1,7 +1,6 @@
 //! Log-spaced frequency spectrum, the second view the TUI renders from.
 
-use std::f32::consts::PI;
-
+use crate::fft::Fft;
 use crate::scope::WaveScope;
 
 const FFT_SIZE: usize = 4096;
@@ -19,11 +18,9 @@ pub struct Band {
 
 /// Computes a log-spaced magnitude spectrum from a [`WaveScope`] channel.
 pub struct Spectrum {
-    window: Vec<f32>,
+    fft: Fft,
     samples: Vec<f32>,
-    re: Vec<f32>,
-    im: Vec<f32>,
-    rev: Vec<usize>,
+    band_mag: Vec<f32>,
     band_bins: Vec<(usize, usize)>,
     weight_db: Vec<f32>,
     bands: Vec<Band>,
@@ -34,11 +31,6 @@ impl Spectrum {
     /// Build a spectrum with `n_bands` log-spaced bands over `min_hz..=max_hz`.
     pub fn new(sample_rate: u32, n_bands: usize, min_hz: f32, max_hz: f32) -> Self {
         let n = FFT_SIZE;
-        let window = (0..n)
-            .map(|i| 0.5 - 0.5 * (2.0 * PI * i as f32 / n as f32).cos())
-            .collect();
-
-        let rev = bit_reversal(n);
 
         let bin_hz = sample_rate as f32 / n as f32;
         let nyquist_bin = n / 2;
@@ -66,11 +58,9 @@ impl Spectrum {
         }
 
         Self {
-            window,
+            fft: Fft::new(n),
             samples: vec![0.0; n],
-            re: vec![0.0; n],
-            im: vec![0.0; n],
-            rev,
+            band_mag: vec![0.0; n_bands],
             band_bins,
             weight_db,
             bands,
@@ -83,25 +73,19 @@ impl Spectrum {
         let n = self.samples.len();
 
         scope.samples_into(channel, &mut self.samples);
-        for i in 0..n {
-            self.re[i] = self.samples[i] * self.window[i];
-            self.im[i] = 0.0;
-        }
-
-        fft_in_place(&mut self.re, &mut self.im, &self.rev);
+        let (re, im) = self.fft.transform(&self.samples);
 
         let mut weighted_power = 0.0f32;
         for (i, (&(lo, hi), &w_db)) in self.band_bins.iter().zip(&self.weight_db).enumerate() {
             let mut power = 0.0f32;
             for k in lo..hi {
-                let p = self.re[k] * self.re[k] + self.im[k] * self.im[k];
-                power += p;
+                power += re[k] * re[k] + im[k] * im[k];
             }
             let count = (hi - lo).max(1) as f32;
             let mag = (power / count).sqrt() / (n as f32 / 2.0);
             let w_lin = 10.0f32.powf(w_db / 10.0);
             weighted_power += mag * mag * w_lin;
-            self.samples[i] = mag;
+            self.band_mag[i] = mag;
         }
 
         let frame_loudness_db = if weighted_power > 0.0 {
@@ -125,8 +109,12 @@ impl Spectrum {
         let adaptive_gain_db = (frame_loudness_db - baseline_db)
             .clamp(-ADAPTIVE_GAIN_CLAMP_DB, ADAPTIVE_GAIN_CLAMP_DB);
 
-        for ((band, &w_db), i) in self.bands.iter_mut().zip(&self.weight_db).zip(0..) {
-            let mag = self.samples[i];
+        for ((band, &w_db), &mag) in self
+            .bands
+            .iter_mut()
+            .zip(&self.weight_db)
+            .zip(&self.band_mag)
+        {
             band.magnitude = to_db_normalized(mag, w_db + adaptive_gain_db);
         }
 
@@ -159,75 +147,25 @@ fn a_weight_db(f: f32) -> f32 {
     20.0 * ra.log10() + 2.0
 }
 
-/// Precompute the bit-reversal permutation for a length-`n` (power-of-two) FFT.
-fn bit_reversal(n: usize) -> Vec<usize> {
-    let bits = n.trailing_zeros();
-    (0..n)
-        .map(|i| (i as u32).reverse_bits() >> (32 - bits))
-        .map(|x| x as usize)
-        .collect()
-}
-
-/// In-place iterative radix-2 Cooley–Tukey FFT.
-fn fft_in_place(re: &mut [f32], im: &mut [f32], rev: &[usize]) {
-    let n = re.len();
-
-    for i in 0..n {
-        let j = rev[i];
-        if j > i {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-
-    let mut len = 2;
-    while len <= n {
-        let half = len / 2;
-        let ang = -2.0 * PI / len as f32;
-        let (wstep_re, wstep_im) = (ang.cos(), ang.sin());
-        let mut start = 0;
-        while start < n {
-            let (mut w_re, mut w_im) = (1.0f32, 0.0f32);
-            for k in 0..half {
-                let a = start + k;
-                let b = a + half;
-                let t_re = w_re * re[b] - w_im * im[b];
-                let t_im = w_re * im[b] + w_im * re[b];
-                re[b] = re[a] - t_re;
-                im[b] = im[a] - t_im;
-                re[a] += t_re;
-                im[a] += t_im;
-                let nw_re = w_re * wstep_re - w_im * wstep_im;
-                let nw_im = w_re * wstep_im + w_im * wstep_re;
-                w_re = nw_re;
-                w_im = nw_im;
-            }
-            start += len;
-        }
-        len <<= 1;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::PI;
 
     #[test]
     fn pure_tone_lands_in_its_band() {
         let rate = 48_000u32;
         let mut s = Spectrum::new(rate, 24, 30.0, 16_000.0);
         let freq = 1000.0f32;
-        let n = s.samples.len();
-        for i in 0..n {
-            let v = (2.0 * PI * freq * i as f32 / rate as f32).sin();
-            s.re[i] = v * s.window[i];
-            s.im[i] = 0.0;
-        }
-        fft_in_place(&mut s.re, &mut s.im, &s.rev);
+        let n = s.fft.len();
+        let samples: Vec<f32> = (0..n)
+            .map(|i| (2.0 * PI * freq * i as f32 / rate as f32).sin())
+            .collect();
+        let (re, im) = s.fft.transform(&samples);
         for (band, &(lo, hi)) in s.bands.iter_mut().zip(&s.band_bins) {
             let mut power = 0.0f32;
             for k in lo..hi {
-                power += s.re[k] * s.re[k] + s.im[k] * s.im[k];
+                power += re[k] * re[k] + im[k] * im[k];
             }
             let mag = (power / (hi - lo).max(1) as f32).sqrt() / (n as f32 / 2.0);
             band.magnitude = to_db_normalized(mag, a_weight_db(band.center_hz));

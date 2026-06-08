@@ -3,7 +3,7 @@
 use std::convert::TryInto;
 use std::mem;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use pipewire as pw;
 use pw::{properties::properties, spa};
@@ -26,12 +26,13 @@ struct SharedFormat {
     rate: AtomicU32,
 }
 
-/// Handle the TUI uses to consume audio. Drop it to stop capture.
+/// Handle the TUI uses to consume audio.
+///
+/// The capture thread is detached and runs until the process exits; dropping
+/// this handle stops draining the ring but does not tear the thread down.
 pub struct CaptureHandle {
     consumer: RingConsumer,
     format: Arc<SharedFormat>,
-    running: Arc<AtomicBool>,
-    thread: Option<std::thread::JoinHandle<()>>,
 }
 
 impl CaptureHandle {
@@ -56,15 +57,6 @@ impl CaptureHandle {
     }
 }
 
-impl Drop for CaptureHandle {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread;
-        }
-    }
-}
-
 struct CaptureState {
     info: spa::param::audio::AudioInfoRaw,
     format: Arc<SharedFormat>,
@@ -78,10 +70,9 @@ pub fn start() -> CaptureHandle {
     let (producer, consumer) = ring.split();
 
     let format = Arc::new(SharedFormat::default());
-    let running = Arc::new(AtomicBool::new(true));
 
     let thread_format = format.clone();
-    let thread = std::thread::Builder::new()
+    std::thread::Builder::new()
         .name("termwaves-capture".into())
         .spawn(move || {
             if let Err(e) = run_capture(producer, thread_format) {
@@ -90,12 +81,7 @@ pub fn start() -> CaptureHandle {
         })
         .expect("failed to spawn capture thread");
 
-    CaptureHandle {
-        consumer,
-        format,
-        running,
-        thread: Some(thread),
-    }
+    CaptureHandle { consumer, format }
 }
 
 fn run_capture(
@@ -160,17 +146,15 @@ fn run_capture(
                 return;
             }
             let data = &mut datas[0];
-            let n_samples = data.chunk().size() as usize / mem::size_of::<f32>();
+            let n_bytes = data.chunk().size() as usize;
             let Some(bytes) = data.data() else { return };
 
             state.scratch.clear();
-            state.scratch.reserve(n_samples);
-            for n in 0..n_samples {
-                let start = n * mem::size_of::<f32>();
-                let end = start + mem::size_of::<f32>();
-                let f = f32::from_le_bytes(bytes[start..end].try_into().unwrap());
-                state.scratch.push(f);
-            }
+            state.scratch.extend(
+                bytes[..n_bytes]
+                    .chunks_exact(mem::size_of::<f32>())
+                    .map(|b| f32::from_le_bytes(b.try_into().unwrap())),
+            );
             let _ = state.producer.push_slice(&state.scratch);
         })
         .register()?;
