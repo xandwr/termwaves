@@ -254,15 +254,26 @@ fn render_help(f: &mut Frame, area: Rect) {
             Span::raw(desc.to_string()),
         ])
     };
+    let section = |title: &str| {
+        Line::from(Span::styled(
+            title.to_string(),
+            Style::default().add_modifier(Modifier::DIM),
+        ))
+    };
     let lines = vec![
         key("F1-F8", "switch view"),
-        key("1-9", "terrain depth"),
         key("+ / -", "zoom window"),
         key("Tab / c", "next channel"),
         key("F9", "toggle this help"),
         key("F10", "settings"),
         key("Esc", "close overlay"),
         key("q", "quit"),
+        Line::from(""),
+        section("3D terrain (F1)"),
+        key("1-9", "terrain depth"),
+        key("Del", "remove all people"),
+        key("r", "toggle rotary mode"),
+        key("[ / ]", "rotary speed -/+"),
     ];
     render_overlay(f, area, " Help ", lines);
 }
